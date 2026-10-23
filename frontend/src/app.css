@@ -1,0 +1,106 @@
+:root {
+  --bg-base: #090a0f;
+  --bg-surface: #10121a;
+  --bg-card: #151822;
+  --bg-card-hover: #1e2230;
+  --bg-highlight: #282d40;
+  --brand-primary: #3b82f6;
+  --brand-hover: #60a5fa;
+  --brand-glow: rgba(59, 130, 246, 0.4);
+  --text-base: #ffffff;
+  --text-subdued: #94a3b8;
+  --text-muted: #64748b;
+  --border-subtle: #1e2333;
+  --player-height: 90px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+body {
+  background-color: var(--bg-base);
+  color: var(--text-base);
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+  user-select: none;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #23283a;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #38415c;
+}
+
+/* Range input styling with dynamic fill support */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  cursor: pointer;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: transparent; /* Let the dynamic gradient on the input show through */
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: transparent;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 12px;
+  width: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  margin-top: -4px;
+  opacity: 0;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  box-shadow: 0 0 10px var(--brand-glow);
+}
+
+.scrubber-container:hover input[type="range"]::-webkit-slider-thumb,
+.volume-container:hover input[type="range"]::-webkit-slider-thumb {
+  opacity: 1;
+}
+
+/* Equalizer Bars */
+.playing-bar {
+  width: 3px;
+  background: var(--brand-primary);
+  border-radius: 1px;
+  animation: barBounce 1.2s infinite ease-in-out;
+}
+
+.playing-bar:nth-child(1) { animation-delay: 0.1s; height: 10px; }
+.playing-bar:nth-child(2) { animation-delay: 0.3s; height: 16px; }
+.playing-bar:nth-child(3) { animation-delay: 0.2s; height: 8px; }
+
+@keyframes barBounce {
+  0%, 100% { height: 4px; }
+  50% { height: 16px; }
+}

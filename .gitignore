@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+backend/venv/
+*.db
+*.sqlite3
+
+# Audio cache & big downloads
+music_storage/cache/*
+!music_storage/cache/.gitkeep
+music_storage/covers/*
+!music_storage/covers/.gitkeep
+
+# Node & Frontend
+frontend/node_modules/
+frontend/.vscode/
+
+# OS & Temp
+.DS_Store
+Thumbs.db
+*.log
