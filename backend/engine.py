@@ -151,8 +151,8 @@ def get_trending_feed() -> List[Dict[str, Any]]:
         
     return trending
 
-def resolve_stream(video_id: str, source: str = "youtube") -> Dict[str, Any]:
-    """Resolve direct audio stream URL with caching and local offline file detection."""
+def resolve_stream(video_id: str, source: str = "youtube", title: str = "", artist: str = "") -> Dict[str, Any]:
+    """Resolve direct audio stream URL with caching, mobile android extraction, and resilient SoundCloud fallback."""
     # 1. Check if downloaded locally in active storage directory or default cache
     active_dir = get_storage_dir()
     for d in {active_dir, CACHE_DIR}:
@@ -170,7 +170,7 @@ def resolve_stream(video_id: str, source: str = "youtube") -> Dict[str, Any]:
         if now < expiry:
             return {"url": cached_url, "is_local": False, "codec": codec}
 
-    # 3. Extract via yt-dlp with mobile android/ios client to avoid datacenter bot blocks
+    # 3. Extract via yt-dlp with mobile android client to avoid datacenter bot blocks
     target_url = f"https://music.youtube.com/watch?v={video_id}"
     if source == "soundcloud" or video_id.startswith("sc_"):
         target_url = f"https://api.soundcloud.com/tracks/{video_id.replace('sc_', '')}"
@@ -180,20 +180,47 @@ def resolve_stream(video_id: str, source: str = "youtube") -> Dict[str, Any]:
         "quiet": True,
         "noplaylist": True,
         "js_runtimes": {"node": {}},
-        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(target_url, download=False)
-        stream_url = info.get("url")
-        codec = info.get("acodec", "opus")
-        
-        if not stream_url:
-            raise RuntimeError("Could not resolve audio stream URL")
-        
-        # Cache for 4 hours
-        STREAM_CACHE[video_id] = (stream_url, now + CACHE_TTL, codec)
-        return {"url": stream_url, "is_local": False, "codec": codec}
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(target_url, download=False)
+            stream_url = info.get("url")
+            codec = info.get("acodec", "opus")
+            
+            if stream_url:
+                STREAM_CACHE[video_id] = (stream_url, now + CACHE_TTL, codec)
+                return {"url": stream_url, "is_local": False, "codec": codec}
+    except Exception as yt_err:
+        print(f"Primary YouTube stream extraction note for {video_id}: {yt_err}")
+        # Multi-CDN Resilient Fallback: Search SoundCloud by Track & Artist
+        query = f"{artist} {title}".strip()
+        if not query and ytm:
+            try:
+                meta = ytm.get_song(video_id)
+                v_det = meta.get("videoDetails", {})
+                query = f"{v_det.get('author', '')} {v_det.get('title', '')}".strip()
+            except Exception:
+                pass
+
+        if query:
+            try:
+                sc_opts = {"format": "bestaudio/best", "quiet": True, "noplaylist": True}
+                with yt_dlp.YoutubeDL(sc_opts) as sc_ydl:
+                    sc_res = sc_ydl.extract_info(f"scsearch1:{query}", download=False)
+                    entries = sc_res.get("entries", [])
+                    if entries and entries[0].get("url"):
+                        sc_url = entries[0]["url"]
+                        codec = entries[0].get("acodec", "mp3")
+                        STREAM_CACHE[video_id] = (sc_url, now + CACHE_TTL, codec)
+                        return {"url": sc_url, "is_local": False, "codec": codec}
+            except Exception as sc_err:
+                print(f"SoundCloud fallback stream note: {sc_err}")
+
+        raise RuntimeError(f"Could not resolve audio stream URL: {yt_err}")
+
+    raise RuntimeError("Could not resolve audio stream URL")
 
 def download_audio_track(video_id: str, title: str = "", artist: str = "") -> str:
     """Download audio file locally in high quality Opus/MP3 into active storage directory."""
@@ -205,7 +232,7 @@ def download_audio_track(video_id: str, title: str = "", artist: str = "") -> st
         "format": "bestaudio/best",
         "outtmpl": output_template,
         "quiet": True,
-        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "opus",
@@ -282,7 +309,7 @@ def get_track_credits(video_id: str) -> Dict[str, Any]:
         "quiet": True,
         "noplaylist": True,
         "js_runtimes": {"node": {}},
-        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
     }
     
     credits_data = {

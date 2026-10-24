@@ -269,25 +269,31 @@
 
     await tick();
     if (audioElement) {
+      const queryParams = new URLSearchParams({
+        source: track.source || 'youtube',
+        title: track.title || '',
+        artist: track.artist || ''
+      }).toString();
+
       try {
         // Resolve stream URL for direct high-speed cloud CDN playback
-        const streamRes = await fetch(`${API_BASE}/stream/${track.video_id}?source=${track.source || 'youtube'}`);
+        const streamRes = await fetch(`${API_BASE}/stream/${track.video_id}?${queryParams}`);
         if (streamRes.ok) {
           const streamData = await streamRes.json();
           if (streamData.url) {
             audioElement.src = streamData.url.startsWith('http') ? streamData.url : (RAW_API + streamData.url);
           } else {
-            audioElement.src = `${API_BASE}/audio-proxy/${track.video_id}?source=${track.source || 'youtube'}`;
+            audioElement.src = `${API_BASE}/audio-proxy/${track.video_id}?${queryParams}`;
           }
         } else {
-          audioElement.src = `${API_BASE}/audio-proxy/${track.video_id}?source=${track.source || 'youtube'}`;
+          audioElement.src = `${API_BASE}/audio-proxy/${track.video_id}?${queryParams}`;
         }
         await audioElement.play();
         isPlaying = true;
       } catch (err) {
-        console.error('Audio playback error, falling back to proxy:', err);
+        console.warn('Direct audio stream play error, using high-speed audio proxy:', err);
         try {
-          audioElement.src = `${API_BASE}/audio-proxy/${track.video_id}?source=${track.source || 'youtube'}`;
+          audioElement.src = `${API_BASE}/audio-proxy/${track.video_id}?${queryParams}`;
           await audioElement.play();
           isPlaying = true;
         } catch (e2) {
@@ -446,6 +452,19 @@
     const s = Math.floor(sec % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   }
+
+  function handleAudioError() {
+    if (currentTrack && audioElement && !audioElement.src.includes('/audio-proxy/')) {
+      console.warn('Direct stream playback error, switching to high-speed proxy fallback...');
+      const queryParams = new URLSearchParams({
+        source: currentTrack.source || 'youtube',
+        title: currentTrack.title || '',
+        artist: currentTrack.artist || ''
+      }).toString();
+      audioElement.src = `${API_BASE}/audio-proxy/${currentTrack.video_id}?${queryParams}`;
+      audioElement.play().catch(e => console.error('Audio proxy playback error:', e));
+    }
+  }
 </script>
 
 <!-- Hidden Audio Element -->
@@ -455,6 +474,7 @@
   on:ended={playNext}
   on:waiting={() => isLoadingAudio = true}
   on:playing={() => isLoadingAudio = false}
+  on:error={handleAudioError}
 ></audio>
 
 <!-- SONG CREDITS MODAL (SPOTIFY STYLE) -->

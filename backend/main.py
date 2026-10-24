@@ -73,7 +73,7 @@ class StorageConfig(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"status": "online", "service": "Tono Audio Core", "version": "1.0.0"}
+    return {"status": "online", "service": "Tono Audio Core", "version": "1.0.2"}
 
 @app.get("/api/search")
 def search(q: str = Query(..., min_length=1), source: str = "all"):
@@ -93,16 +93,16 @@ def trending():
     return {"results": feed}
 
 @app.get("/api/stream/{video_id}")
-def stream_info(video_id: str, source: str = "youtube"):
-    """Resolve direct audio streaming URL."""
+def stream_info(video_id: str, source: str = "youtube", title: Optional[str] = "", artist: Optional[str] = ""):
+    """Resolve direct audio streaming URL with automatic multi-source fallback."""
     try:
-        info = resolve_stream(video_id, source=source)
+        info = resolve_stream(video_id, source=source, title=title or "", artist=artist or "")
         return info
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/audio-proxy/{video_id}")
-async def audio_proxy(video_id: str, request: Request, source: str = "youtube"):
+async def audio_proxy(video_id: str, request: Request, source: str = "youtube", title: Optional[str] = "", artist: Optional[str] = ""):
     """Proxy audio stream with HTTP Range support for seamless seeking and no CORS issues."""
     try:
         # Check if local file exists first in active storage dir or cache
@@ -116,7 +116,7 @@ async def audio_proxy(video_id: str, request: Request, source: str = "youtube"):
                 return FileResponse(local_mp3, media_type="audio/mpeg")
 
         # Resolve stream URL
-        stream_data = resolve_stream(video_id, source=source)
+        stream_data = resolve_stream(video_id, source=source, title=title or "", artist=artist or "")
         stream_url = stream_data["url"]
 
         # Forward range headers
@@ -125,7 +125,7 @@ async def audio_proxy(video_id: str, request: Request, source: str = "youtube"):
         if range_header:
             headers["Range"] = range_header
 
-        client = httpx.AsyncClient(timeout=15.0)
+        client = httpx.AsyncClient(timeout=20.0, follow_redirects=True)
         req = client.build_request("GET", stream_url, headers=headers)
         r = await client.send(req, stream=True)
 
