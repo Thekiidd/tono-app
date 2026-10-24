@@ -4,7 +4,7 @@
     Play, Pause, SkipForward, SkipBack, Shuffle, Repeat, Volume1, Volume2, VolumeX,
     Search, Heart, Music, ListMusic, Download, Disc, Clock, Mic2, Home,
     Library, HardDrive, Sparkles, User, Info, X, Check, Disc3, Settings, Folder,
-    Maximize2, Minimize2, SlidersHorizontal, Plus
+    Maximize2, Minimize2, SlidersHorizontal, Plus, Radio
   } from 'lucide-svelte';
 
   // --- Navigation & Views ---
@@ -67,6 +67,9 @@
   let sleepTimerInterval = null;
   const searchCache = new Map();
   const artistCache = new Map();
+  let forYouData = null;
+  let isLoadingForYou = false;
+  let matchedArtist = null;
   let toastMessage = '';
   let toastTimeout;
   const prefetchedSet = new Set();
@@ -87,7 +90,8 @@
       fetchTrending(),
       fetchFavorites(),
       fetchPlaylists(),
-      fetchStorageStats()
+      fetchStorageStats(),
+      loadForYouFeed()
     ]);
 
     // Media Session API for Keyboard Media Keys & Windows Controls
@@ -380,6 +384,53 @@
     showToast('🔊 Salida de audio restablecida');
   }
 
+  // --- Discovery & Smart Radio Engine ---
+  async function loadForYouFeed() {
+    isLoadingForYou = true;
+    try {
+      const res = await fetch(`${API_BASE}/recommendations/for-you`);
+      if (res.ok) {
+        forYouData = await res.json();
+      }
+    } catch (e) {
+      console.warn('For-you feed note:', e);
+    } finally {
+      isLoadingForYou = false;
+    }
+  }
+
+  async function startArtistRadio(artistName) {
+    showToast(`Iniciando Radio de ${artistName}...`);
+    try {
+      const res = await fetch(`${API_BASE}/recommendations/radio?artist=${encodeURIComponent(artistName)}`);
+      const data = await res.json();
+      if (data.tracks && data.tracks.length > 0) {
+        playTrack(data.tracks[0], data.tracks, 0);
+        showToast(`✨ Radio de ${artistName} activa (${data.tracks.length} canciones)`);
+      } else {
+        openArtistProfile(artistName);
+      }
+    } catch (e) {
+      console.error('Radio error:', e);
+      openArtistProfile(artistName);
+    }
+  }
+
+  async function startSongRadio(track, e) {
+    if (e) e.stopPropagation();
+    showToast(`Iniciando Radio de "${track.title}"...`);
+    try {
+      const res = await fetch(`${API_BASE}/recommendations/radio?video_id=${track.video_id}`);
+      const data = await res.json();
+      if (data.tracks && data.tracks.length > 0) {
+        playTrack(data.tracks[0], data.tracks, 0);
+        showToast(`✨ Radio similar activa (${data.tracks.length} canciones)`);
+      }
+    } catch (e) {
+      console.error('Song radio error:', e);
+    }
+  }
+
   // --- Search Handler with Instant 0ms Memory Cache ---
   let searchTimeout;
   function handleSearchInput() {
@@ -387,11 +438,14 @@
     const q = searchQuery.trim();
     if (!q) {
       searchResults = [];
+      matchedArtist = null;
       return;
     }
     const cacheKey = `${q.toLowerCase()}::${searchSource}`;
     if (searchCache.has(cacheKey)) {
-      searchResults = searchCache.get(cacheKey);
+      const cached = searchCache.get(cacheKey);
+      searchResults = cached.results || [];
+      matchedArtist = cached.matched_artist || null;
       isSearching = false;
       return;
     }
@@ -403,7 +457,9 @@
     if (!q) return;
     const cacheKey = `${q.toLowerCase()}::${searchSource}`;
     if (searchCache.has(cacheKey)) {
-      searchResults = searchCache.get(cacheKey);
+      const cached = searchCache.get(cacheKey);
+      searchResults = cached.results || [];
+      matchedArtist = cached.matched_artist || null;
       isSearching = false;
       return;
     }
@@ -412,7 +468,8 @@
       const res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(q)}&source=${searchSource}`);
       const data = await res.json();
       searchResults = data.results || [];
-      searchCache.set(cacheKey, searchResults);
+      matchedArtist = data.matched_artist || null;
+      searchCache.set(cacheKey, { results: searchResults, matched_artist: matchedArtist });
     } catch (e) {
       console.error('Search error:', e);
     } finally {
@@ -574,6 +631,22 @@
     } else if (repeatMode === 1) {
       queueIndex = 0;
       playTrack(queue[0]);
+    } else if (currentTrack) {
+      // Autoplay: seamlessly load smart radio recommendations
+      fetch(`${API_BASE}/recommendations/radio?video_id=${currentTrack.video_id}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.tracks && data.tracks.length > 1) {
+            const nextTracks = data.tracks.filter(t => t.video_id !== currentTrack.video_id);
+            if (nextTracks.length > 0) {
+              queue = [...queue, ...nextTracks];
+              queueIndex++;
+              playTrack(queue[queueIndex]);
+              showToast('✨ Autoplay: Continuando con pistas recomendadas');
+            }
+          }
+        })
+        .catch(console.warn);
     }
   }
 
@@ -1663,6 +1736,80 @@
       <!-- HOME TAB -->
       {#if activeTab === 'home'}
         <div>
+          <!-- CONTEXTUAL DISCOVERY (FOR YOU) -->
+          {#if forYouData && forYouData.tracks?.length > 0}
+            <div style="margin-bottom: 40px; background: linear-gradient(180deg, rgba(24, 34, 56, 0.4) 0%, rgba(12, 16, 24, 0.2) 100%); border: 1px solid #1e2638; border-radius: 16px; padding: 24px;">
+              <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 18px;">
+                <div>
+                  <div style="display: flex; align-items: center; gap: 6px; font-size: 0.76rem; font-weight: 800; color: #3b82f6; letter-spacing: 0.8px; text-transform: uppercase;">
+                    <Sparkles size={14} /> Recomendado para ti
+                  </div>
+                  <h2 style="font-size: 1.8rem; font-weight: 900; letter-spacing: -0.8px; margin-top: 4px;">{forYouData.heading}</h2>
+                </div>
+                <button 
+                  type="button"
+                  on:click={() => startArtistRadio(forYouData.seed_artist)}
+                  style="font-size: 0.82rem; color: #60a5fa; background: #1c2233; border: 1px solid #2e3852; padding: 8px 16px; border-radius: 500px; font-weight: 700; cursor: pointer; display: flex; align-items: center; gap: 8px;"
+                  class="hover:border-blue-500"
+                >
+                  <Radio size={14} /> Iniciar Radio de {forYouData.seed_artist}
+                </button>
+              </div>
+
+              <!-- FOR YOU TRACKS CARDS -->
+              <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-bottom: 22px;">
+                {#each forYouData.tracks.slice(0, 6) as track}
+                  <div 
+                    role="row"
+                    tabindex="0"
+                    on:mouseenter={() => prefetchTrack(track)}
+                    on:click={() => playTrack(track, forYouData.tracks)}
+                    on:keydown={(e) => { if (e.key === 'Enter') playTrack(track, forYouData.tracks); }}
+                    style="background: #11141e; border: 1px solid #1e2538; border-radius: 10px; display: flex; align-items: center; gap: 12px; cursor: pointer; overflow: hidden; text-align: left; padding: 0; color: #fff; transition: all 0.15s;"
+                    class="hover:border-[#3b82f6] hover:bg-[#161b29]"
+                  >
+                    <img src={track.thumbnail} alt={track.title} style="width: 64px; height: 64px; object-fit: cover; flex-shrink: 0;" />
+                    <div style="flex: 1; overflow: hidden; padding-right: 8px;">
+                      <div style="font-weight: 700; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{track.title}</div>
+                      <span 
+                        on:click={(e) => openArtistProfile(track.artist, e)}
+                        style="font-size: 0.76rem; color: #94a3b8; cursor: pointer;"
+                        class="hover:underline"
+                      >
+                        {track.artist}
+                      </span>
+                    </div>
+                    <div style="margin-right: 12px; width: 34px; height: 34px; border-radius: 50%; background: #3b82f6; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4); flex-shrink: 0;">
+                      <Play size={16} color="#fff" fill="#fff" style="margin-left: 2px;" />
+                    </div>
+                  </div>
+                {/each}
+              </div>
+
+              <!-- SIMILAR ARTISTS ROW -->
+              {#if forYouData.similar_artists?.length > 0}
+                <div style="border-top: 1px solid #1e2638; padding-top: 18px;">
+                  <div style="font-size: 0.8rem; font-weight: 800; color: #cbd5e1; margin-bottom: 14px; display: flex; align-items: center; gap: 8px;">
+                    Artistas similares a {forYouData.seed_artist}:
+                  </div>
+                  <div style="display: flex; gap: 18px; overflow-x: auto; padding-bottom: 6px;">
+                    {#each forYouData.similar_artists as sim}
+                      <div 
+                        on:click={() => openArtistProfile(sim.name)}
+                        style="display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer; flex-shrink: 0; width: 95px; text-align: center;"
+                        class="hover:scale-105 transition-transform"
+                      >
+                        <img src={sim.thumbnail} alt={sim.name} style="width: 72px; height: 72px; border-radius: 50%; object-fit: cover; border: 2px solid #273147;" />
+                        <div style="font-weight: 700; font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%;">{sim.name}</div>
+                        <div style="font-size: 0.68rem; color: #64748b;">{sim.subscribers || 'Similar'}</div>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/if}
+
           <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 24px;">
             <div>
               <span style="font-size: 0.78rem; font-weight: 700; color: #60a5fa; letter-spacing: 1px; text-transform: uppercase;">Descubre</span>
@@ -1756,6 +1903,40 @@
               <Disc size={26} class="animate-spin" /> Buscando pistas y remixes en tiempo real...
             </div>
           {:else if searchResults.length > 0}
+            {#if matchedArtist}
+              <!-- SPOTIFY-STYLE TOP RESULT: ARTIST SPOTLIGHT CARD -->
+              <div style="background: linear-gradient(135deg, #182238 0%, #0e121a 100%); border: 1px solid #293550; border-radius: 14px; padding: 22px 26px; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 12px 36px rgba(0,0,0,0.4);">
+                <div style="display: flex; align-items: center; gap: 20px;">
+                  <img src={matchedArtist.thumbnail} alt={matchedArtist.name} style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover; border: 2px solid #3b82f6; box-shadow: 0 6px 20px rgba(0,0,0,0.5);" />
+                  <div>
+                    <div style="display: flex; align-items: center; gap: 6px; color: #60a5fa; font-size: 0.72rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;">
+                      <Check size={14} /> Artista Oficial Coincidente
+                    </div>
+                    <h3 style="font-size: 1.8rem; font-weight: 900; letter-spacing: -0.5px; margin: 2px 0;">{matchedArtist.name}</h3>
+                    <div style="color: #94a3b8; font-size: 0.82rem;">{matchedArtist.subscribers ? `${matchedArtist.subscribers} oyentes` : 'Explorar discografía y canciones similares'}</div>
+                  </div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 12px;">
+                  <button 
+                    type="button"
+                    on:click={() => startArtistRadio(matchedArtist.name)}
+                    style="padding: 10px 20px; border-radius: 500px; background: #3b82f6; border: none; color: #fff; font-weight: 800; font-size: 0.85rem; cursor: pointer; display: flex; align-items: center; gap: 8px;"
+                    class="hover:scale-105"
+                  >
+                    <Radio size={16} /> Radio del Artista
+                  </button>
+                  <button 
+                    type="button"
+                    on:click={() => openArtistProfile(matchedArtist.name)}
+                    style="padding: 10px 20px; border-radius: 500px; background: #22283a; border: 1px solid #353f5b; color: #fff; font-weight: 700; font-size: 0.85rem; cursor: pointer;"
+                    class="hover:bg-[#2b334a]"
+                  >
+                    Ver Perfil Completo
+                  </button>
+                </div>
+              </div>
+            {/if}
+
             <div style="margin-bottom: 20px;">
               <span style="font-size: 0.75rem; color: #64748b; font-weight: 700; text-transform: uppercase;">Resultados de Búsqueda</span>
               <h3 style="font-size: 1.6rem; font-weight: 800; letter-spacing: -0.5px;">"{searchQuery}"</h3>
@@ -1902,6 +2083,14 @@
               >
                 <Play size={18} fill="#fff" /> Reproducir Todo
               </button>
+              <button 
+                type="button"
+                on:click={() => startArtistRadio(currentArtist.name)}
+                style="padding: 12px 24px; border-radius: 500px; background: #1c2233; border: 1px solid #2e3852; color: #fff; font-weight: 800; font-size: 0.95rem; display: flex; align-items: center; gap: 10px; cursor: pointer;"
+                class="hover:bg-[#28324a]"
+              >
+                <Radio size={18} color="#60a5fa" /> Iniciar Radio del Artista
+              </button>
             </div>
 
             <!-- TOP SONGS SECTION -->
@@ -1943,6 +2132,69 @@
                 {/each}
               </div>
             </div>
+
+            <!-- SIMILAR ARTISTS SECTION ("LOS FANS TAMBIÉN ESCUCHAN") -->
+            {#if currentArtist.related_artists?.length > 0}
+              <div style="margin-bottom: 44px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;">
+                  <h3 style="font-size: 1.4rem; font-weight: 800; letter-spacing: -0.5px;">Fans también escuchan</h3>
+                  <span style="font-size: 0.8rem; color: #64748b;">Artistas similares y recomendados</span>
+                </div>
+                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 18px;">
+                  {#each currentArtist.related_artists as sim}
+                    <div 
+                      on:click={() => openArtistProfile(sim.name)}
+                      style="background: #12151e; border: 1px solid #1c2130; border-radius: 14px; padding: 18px 14px; text-align: center; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 10px; transition: all 0.2s;"
+                      class="hover:border-[#3b82f6] hover:bg-[#181d2a] hover:scale-105"
+                    >
+                      <img src={sim.thumbnail} alt={sim.name} style="width: 88px; height: 88px; border-radius: 50%; object-fit: cover; border: 2px solid #273147;" />
+                      <div style="font-weight: 700; font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%;">{sim.name}</div>
+                      <div style="font-size: 0.72rem; color: #94a3b8;">{sim.subscribers || 'Artista Afín'}</div>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
+            <!-- RADIO & SIMILAR SONGS SECTION -->
+            {#if currentArtist.radio_tracks?.length > 0}
+              <div style="margin-bottom: 44px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;">
+                  <div>
+                    <h3 style="font-size: 1.4rem; font-weight: 800; letter-spacing: -0.5px;">Mix de Canciones Similares</h3>
+                    <p style="font-size: 0.78rem; color: #94a3b8; margin-top: 2px;">Canciones del mismo género y estilo recomendadas para ti.</p>
+                  </div>
+                  <button 
+                    type="button"
+                    on:click={() => playTrack(currentArtist.radio_tracks[0], currentArtist.radio_tracks, 0)}
+                    style="padding: 8px 18px; border-radius: 500px; background: #22283a; border: 1px solid #353f5b; color: #fff; font-size: 0.82rem; font-weight: 700; cursor: pointer; display: flex; align-items: center; gap: 8px;"
+                    class="hover:bg-[#2c344d]"
+                  >
+                    <Play size={14} fill="#fff" /> Reproducir Mix
+                  </button>
+                </div>
+                
+                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px;">
+                  {#each currentArtist.radio_tracks.slice(0, 8) as rTrack, idx}
+                    <div 
+                      role="row"
+                      tabindex="0"
+                      on:mouseenter={() => prefetchTrack(rTrack)}
+                      on:click={() => playTrack(rTrack, currentArtist.radio_tracks, idx)}
+                      style="background: #12151e; border: 1px solid #1c2130; border-radius: 10px; display: flex; align-items: center; gap: 12px; padding: 10px; cursor: pointer; transition: all 0.15s;"
+                      class="hover:bg-[#181d2a] hover:border-[#2f3952]"
+                    >
+                      <img src={rTrack.thumbnail} alt={rTrack.title} style="width: 52px; height: 52px; border-radius: 8px; object-fit: cover; flex-shrink: 0;" />
+                      <div style="flex: 1; overflow: hidden;">
+                        <div style="font-weight: 700; font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{rTrack.title}</div>
+                        <div style="font-size: 0.76rem; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{rTrack.artist}</div>
+                      </div>
+                      <div style="color: #64748b; font-size: 0.78rem; margin-right: 6px;">{rTrack.duration}</div>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
 
             <!-- DISCOGRAPHY (ALBUMS & SINGLES) -->
             {#if currentArtist.albums?.length > 0}

@@ -17,6 +17,7 @@ from database import (
 from engine import (
     search_music, get_trending_feed, resolve_stream, download_audio_track,
     fetch_synced_lyrics, get_artist_profile, get_track_credits,
+    get_smart_recommendations, ytm, clean_thumbnail,
     get_storage_dir, is_track_cached, STREAM_CACHE,
     CACHE_DIR, COVERS_DIR, BASE_DIR
 )
@@ -89,17 +90,85 @@ def prefetch_feed_streams(tracks: List[Dict[str, Any]], limit: int = 8):
 
 @app.get("/api/health")
 def health():
-    return {"status": "online", "service": "Tono Audio Core", "version": "1.0.5"}
+    return {"status": "online", "service": "Tono Audio Core", "version": "1.0.6"}
 
 @app.get("/api/search")
 def search(q: str = Query(..., min_length=1), source: str = "all", background_tasks: BackgroundTasks = BackgroundTasks()):
-    """Search YouTube Music, SoundCloud and local tracks."""
+    """Search YouTube Music, SoundCloud and local tracks with matched artist discovery."""
     results = search_music(q, source=source)
     for item in results:
         item["is_favorite"] = is_favorite(item["video_id"])
     if len(results) > 0:
         background_tasks.add_task(prefetch_feed_streams, results, 4)
-    return {"query": q, "count": len(results), "results": results}
+
+    matched_artist = None
+    try:
+        if ytm and source in ("all", "youtube", "ytmusic"):
+            art_res = ytm.search(q.strip(), filter="artists")
+            if art_res:
+                top_art = art_res[0]
+                matched_artist = {
+                    "name": top_art.get("artist"),
+                    "browse_id": top_art.get("browseId"),
+                    "subscribers": top_art.get("subscribers", ""),
+                    "radio_id": top_art.get("radioId", ""),
+                    "thumbnail": clean_thumbnail(top_art.get("thumbnails", []))
+                }
+    except Exception as e:
+        print("Search artist match note:", e)
+
+    return {
+        "query": q,
+        "matched_artist": matched_artist,
+        "count": len(results),
+        "results": results
+    }
+
+@app.get("/api/recommendations/radio")
+def get_radio(video_id: Optional[str] = None, artist: Optional[str] = None, limit: int = 20, background_tasks: BackgroundTasks = BackgroundTasks()):
+    """Get smart radio stream of similar tracks based on a track or artist."""
+    recs = get_smart_recommendations(video_id=video_id, artist=artist, limit=limit)
+    for item in recs:
+        item["is_favorite"] = is_favorite(item["video_id"])
+    if len(recs) > 0:
+        background_tasks.add_task(prefetch_feed_streams, recs, 4)
+    return {"seed_video_id": video_id, "seed_artist": artist, "count": len(recs), "tracks": recs}
+
+@app.get("/api/recommendations/for-you")
+def get_for_you_feed(background_tasks: BackgroundTasks = BackgroundTasks()):
+    """Contextual 'Because you listened to [Artist]' discovery feed."""
+    history = get_recent_history(limit=10)
+    seed_track = None
+    seed_artist = None
+    
+    if history:
+        for h in history:
+            if h.get("artist") and h["artist"] != "Unknown":
+                seed_track = h
+                seed_artist = h["artist"]
+                break
+                
+    if not seed_artist:
+        seed_artist = "Imagine Dragons"
+        seed_track = {"video_id": "Kx7B-XvmFtE", "title": "Believer", "artist": "Imagine Dragons"}
+
+    recs = get_smart_recommendations(video_id=seed_track.get("video_id"), artist=seed_artist, limit=14)
+    for item in recs:
+        item["is_favorite"] = is_favorite(item["video_id"])
+        
+    art_profile = get_artist_profile(seed_artist)
+    similar_artists = art_profile.get("related_artists", [])[:8]
+    
+    if len(recs) > 0:
+        background_tasks.add_task(prefetch_feed_streams, recs, 4)
+
+    return {
+        "heading": f"Porque escuchaste a {seed_artist}",
+        "seed_artist": seed_artist,
+        "seed_track": seed_track,
+        "tracks": recs,
+        "similar_artists": similar_artists
+    }
 
 @app.get("/api/trending")
 def trending(background_tasks: BackgroundTasks):

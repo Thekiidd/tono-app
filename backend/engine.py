@@ -347,28 +347,115 @@ def get_artist_profile(artist_name: str) -> Dict[str, Any]:
             
         # Clean albums & singles
         albums = []
-        for alb in data.get("albums", {}).get("results", []) + data.get("singles", {}).get("results", []):
+        for alb in data.get("albums", {}).get("results", []):
             albums.append({
                 "browse_id": alb.get("browseId"),
                 "title": alb.get("title", ""),
                 "year": alb.get("year", ""),
-                "type": alb.get("type", "Álbum"),
+                "type": "Álbum",
                 "thumbnail": clean_thumbnail(alb.get("thumbnails", []))
             })
+
+        singles = []
+        for sgl in data.get("singles", {}).get("results", []):
+            singles.append({
+                "browse_id": sgl.get("browseId"),
+                "title": sgl.get("title", ""),
+                "year": sgl.get("year", ""),
+                "type": "Sencillo",
+                "thumbnail": clean_thumbnail(sgl.get("thumbnails", []))
+            })
+
+        # Clean related / similar artists
+        related_artists = []
+        for r in data.get("related", {}).get("results", []):
+            r_name = r.get("title")
+            if not r_name:
+                continue
+            related_artists.append({
+                "name": r_name,
+                "browse_id": r.get("browseId", ""),
+                "subscribers": r.get("subscribers", ""),
+                "thumbnail": clean_thumbnail(r.get("thumbnails", []))
+            })
+
+        radio_id = data.get("radioId") or ""
+        radio_tracks = []
+        if radio_id:
+            try:
+                wp = ytm.get_watch_playlist(playlistId=radio_id, limit=15)
+                for t in wp.get("tracks", []):
+                    vid = t.get("videoId")
+                    if not vid or vid in [s["video_id"] for s in top_songs]:
+                        continue
+                    t_artists = [a.get("name", "") for a in t.get("artists", [])]
+                    radio_tracks.append({
+                        "video_id": vid,
+                        "title": t.get("title", "Unknown Title"),
+                        "artist": ", ".join(t_artists) if t_artists else data.get("name", ""),
+                        "album": t.get("album", {}).get("name", "") if t.get("album") else "",
+                        "duration": t.get("length", "3:30"),
+                        "thumbnail": clean_thumbnail(t.get("thumbnail", [])),
+                        "source": "youtube",
+                        "is_cached": is_track_cached(vid)
+                    })
+            except Exception as wp_err:
+                print("Artist radio fetch note:", wp_err)
 
         profile = {
             "name": data.get("name", clean_name),
             "description": data.get("description", ""),
             "subscribers": data.get("subscribers", ""),
             "banner": clean_thumbnail(data.get("thumbnails", [])),
+            "radio_id": radio_id,
             "top_songs": top_songs,
-            "albums": albums
+            "albums": albums,
+            "singles": singles,
+            "related_artists": related_artists,
+            "radio_tracks": radio_tracks
         }
         ARTIST_CACHE[a_key] = (profile, now + ARTIST_CACHE_TTL)
         return profile
     except Exception as e:
         print("Error fetching artist profile:", e)
         return {}
+
+def get_smart_recommendations(video_id: Optional[str] = None, artist: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+    """Retrieve smart recommendations/radio based on a seed song or artist."""
+    if not ytm:
+        return []
+    
+    tracks = []
+    try:
+        raw_tracks = []
+        if video_id:
+            wp = ytm.get_watch_playlist(videoId=video_id, limit=limit)
+            raw_tracks = wp.get("tracks", [])
+        elif artist:
+            search_res = ytm.search(artist, filter="artists")
+            if search_res and search_res[0].get("radioId"):
+                wp = ytm.get_watch_playlist(playlistId=search_res[0]["radioId"], limit=limit)
+                raw_tracks = wp.get("tracks", [])
+
+        for t in raw_tracks[:limit]:
+            vid = t.get("videoId")
+            if not vid:
+                continue
+            t_artists = [a.get("name", "") for a in t.get("artists", [])]
+            tracks.append({
+                "video_id": vid,
+                "title": t.get("title", "Unknown Title"),
+                "artist": ", ".join(t_artists) if t_artists else "Unknown Artist",
+                "album": t.get("album", {}).get("name", "") if t.get("album") else "",
+                "duration": t.get("length", "3:30"),
+                "thumbnail": clean_thumbnail(t.get("thumbnail", [])),
+                "source": "youtube",
+                "is_cached": is_track_cached(vid)
+            })
+    except Exception as e:
+        print("Smart recommendations error:", e)
+
+    return tracks
 
 def get_track_credits(video_id: str) -> Dict[str, Any]:
     """Extract official credits: composers, writers, producers, engineers, and record label."""
