@@ -54,7 +54,8 @@
   $: volumePercent = isMuted ? 0 : Math.round(volume * 100);
 
   // Cloud & Local dynamic API base
-  const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+  const RAW_API = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+  const API_BASE = RAW_API ? `${RAW_API}/api` : '/api';
 
   onMount(async () => {
     await Promise.all([
@@ -210,23 +211,23 @@
     if (audioElement) {
       try {
         // Resolve stream URL for direct high-speed cloud CDN playback
-        const streamRes = await fetch(`${API_BASE}/api/stream/${track.video_id}?source=${track.source || 'youtube'}`);
+        const streamRes = await fetch(`${API_BASE}/stream/${track.video_id}?source=${track.source || 'youtube'}`);
         if (streamRes.ok) {
           const streamData = await streamRes.json();
           if (streamData.url) {
-            audioElement.src = streamData.url.startsWith('http') ? streamData.url : `${API_BASE}${streamData.url}`;
+            audioElement.src = streamData.url.startsWith('http') ? streamData.url : (RAW_API + streamData.url);
           } else {
-            audioElement.src = `${API_BASE}/api/audio-proxy/${track.video_id}?source=${track.source || 'youtube'}`;
+            audioElement.src = `${API_BASE}/audio-proxy/${track.video_id}?source=${track.source || 'youtube'}`;
           }
         } else {
-          audioElement.src = `${API_BASE}/api/audio-proxy/${track.video_id}?source=${track.source || 'youtube'}`;
+          audioElement.src = `${API_BASE}/audio-proxy/${track.video_id}?source=${track.source || 'youtube'}`;
         }
         await audioElement.play();
         isPlaying = true;
       } catch (err) {
         console.error('Audio playback error, falling back to proxy:', err);
         try {
-          audioElement.src = `${API_BASE}/api/audio-proxy/${track.video_id}?source=${track.source || 'youtube'}`;
+          audioElement.src = `${API_BASE}/audio-proxy/${track.video_id}?source=${track.source || 'youtube'}`;
           await audioElement.play();
           isPlaying = true;
         } catch (e2) {
