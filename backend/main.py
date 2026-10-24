@@ -1,18 +1,23 @@
 import os
 import shutil
 import string
-from fastapi import FastAPI, HTTPException, Query, Request, Response, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, Request, Response, BackgroundTasks, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import httpx
+import socket
 
 from database import (
     init_db, add_favorite, remove_favorite, get_favorites, is_favorite,
     create_playlist, get_playlists, get_playlist_tracks, add_track_to_playlist,
-    delete_playlist, add_history, get_recent_history, get_setting, set_setting
+    delete_playlist, add_history, get_recent_history, get_setting, set_setting,
+    add_library_folder, get_library_folders, remove_library_folder,
+    upsert_library_track, get_library_tracks, get_library_albums,
+    get_library_artists, get_library_genres, get_library_stats,
+    toggle_library_favorite, increment_library_play, delete_library_track
 )
 from engine import (
     search_music, get_trending_feed, resolve_stream, download_audio_track,
@@ -20,6 +25,9 @@ from engine import (
     get_smart_recommendations, ytm, clean_thumbnail,
     get_storage_dir, is_track_cached, STREAM_CACHE,
     CACHE_DIR, COVERS_DIR, BASE_DIR
+)
+from library import (
+    scan_directory, parse_audio_file, fetch_local_track_lyrics, SUPPORTED_EXTENSIONS
 )
 
 FRONTEND_DIST = os.path.join(BASE_DIR, "frontend", "dist")
@@ -49,6 +57,211 @@ def serve_local_audio(filename: str):
             media_type = "audio/ogg" if filename.endswith(".opus") else "audio/mpeg"
             return FileResponse(fpath, media_type=media_type)
     raise HTTPException(status_code=404, detail="Audio file not found")
+
+@app.get("/api/covers/{filename}")
+def serve_cover(filename: str):
+    """Serve local cached album artwork."""
+    fpath = os.path.join(COVERS_DIR, filename)
+    if os.path.exists(fpath):
+        media_type = "image/png" if filename.endswith(".png") else "image/jpeg"
+        return FileResponse(fpath, media_type=media_type)
+    raise HTTPException(status_code=404, detail="Cover not found")
+
+# --- Local Music Library Core ---
+
+@app.get("/api/library/stats")
+def library_stats():
+    """Retrieve total songs, albums, artists, total gigabytes, and hours."""
+    return get_library_stats()
+
+@app.get("/api/library/tracks")
+def list_library_tracks(
+    genre: str = "", artist: str = "", album: str = "", 
+    q: str = "", sort_by: str = "title"
+):
+    """List local library songs with filters and sorting."""
+    return {"tracks": get_library_tracks(genre=genre, artist=artist, album=album, query=q, sort_by=sort_by)}
+
+@app.get("/api/library/albums")
+def list_library_albums():
+    """List all indexed local albums."""
+    return {"albums": get_library_albums()}
+
+@app.get("/api/library/artists")
+def list_library_artists():
+    """List all indexed local artists."""
+    return {"artists": get_library_artists()}
+
+@app.get("/api/library/genres")
+def list_library_genres():
+    """List all indexed local genres."""
+    return {"genres": get_library_genres()}
+
+@app.get("/api/library/folders")
+def list_library_folders():
+    """List configured music folders."""
+    active_dir = get_storage_dir()
+    folders = get_library_folders()
+    if active_dir not in folders:
+        folders = [active_dir] + folders
+    return {"folders": folders}
+
+class AddFolderRequest(BaseModel):
+    folder_path: str
+
+@app.post("/api/library/folders")
+def add_folder(req: AddFolderRequest):
+    """Add a new folder on disk to index."""
+    if not os.path.exists(req.folder_path):
+        raise HTTPException(status_code=400, detail="Folder path does not exist on disk")
+    add_library_folder(req.folder_path)
+    return {"status": "added", "folder_path": req.folder_path}
+
+@app.delete("/api/library/folders")
+def delete_folder(folder_path: str = Query(...)):
+    """Remove a folder from index."""
+    remove_library_folder(folder_path)
+    return {"status": "removed", "folder_path": folder_path}
+
+def scan_all_configured_folders():
+    active_dir = get_storage_dir()
+    configured = get_library_folders()
+    all_dirs = {active_dir, CACHE_DIR}
+    for c in configured:
+        if os.path.exists(c):
+            all_dirs.add(c)
+    
+    total_added = 0
+    for d in all_dirs:
+        tracks = scan_directory(d, COVERS_DIR)
+        for t in tracks:
+            upsert_library_track(t)
+            total_added += 1
+    return total_added
+
+@app.post("/api/library/scan")
+def trigger_library_scan(background_tasks: BackgroundTasks):
+    """Scan all configured local folders and index metadata in background."""
+    background_tasks.add_task(scan_all_configured_folders)
+    return {"status": "scanning", "message": "Escaneo de biblioteca iniciado en segundo plano"}
+
+@app.post("/api/library/upload")
+async def upload_audio_files(files: List[UploadFile] = File(...)):
+    """Upload audio files directly via drag-and-drop into the active local library folder."""
+    target_dir = get_storage_dir()
+    os.makedirs(target_dir, exist_ok=True)
+    saved_tracks = []
+
+    for file in files:
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext in SUPPORTED_EXTENSIONS:
+            safe_name = os.path.basename(file.filename)
+            dest_path = os.path.join(target_dir, safe_name)
+            with open(dest_path, "wb") as f_out:
+                shutil.copyfileobj(file.file, f_out)
+            track_info = parse_audio_file(dest_path, COVERS_DIR)
+            if track_info:
+                track_id = upsert_library_track(track_info)
+                track_info["id"] = track_id
+                saved_tracks.append(track_info)
+
+    return {"uploaded": len(saved_tracks), "tracks": saved_tracks}
+
+@app.get("/api/library/stream/{track_id}")
+def stream_local_track(track_id: int, request: Request):
+    """Stream local track from disk with full HTTP 206 Partial Content Range support."""
+    from database import get_connection
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT filepath, codec, title, artist FROM library_tracks WHERE id = ?", (track_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row or not os.path.exists(row[0]):
+        raise HTTPException(status_code=404, detail="Track file not found on disk")
+
+    filepath = row[0]
+    increment_library_play(track_id)
+
+    file_size = os.path.getsize(filepath)
+    ext = os.path.splitext(filepath)[1].lower()
+    media_types = {
+        ".mp3": "audio/mpeg",
+        ".flac": "audio/flac",
+        ".wav": "audio/wav",
+        ".ogg": "audio/ogg",
+        ".opus": "audio/ogg",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac"
+    }
+    media_type = media_types.get(ext, "audio/mpeg")
+
+    range_header = request.headers.get("Range")
+    if range_header:
+        byte_range = range_header.replace("bytes=", "").split("-")
+        start = int(byte_range[0])
+        end = int(byte_range[1]) if byte_range[1] else file_size - 1
+        length = end - start + 1
+
+        def iter_file():
+            with open(filepath, "rb") as f:
+                f.seek(start)
+                bytes_left = length
+                while bytes_left > 0:
+                    chunk = f.read(min(bytes_left, 64 * 1024))
+                    if not chunk:
+                        break
+                    bytes_left -= len(chunk)
+                    yield chunk
+
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+            "Access-Control-Allow-Origin": "*",
+        }
+        return StreamingResponse(iter_file(), status_code=206, headers=headers, media_type=media_type)
+
+    return FileResponse(filepath, media_type=media_type)
+
+@app.get("/api/library/lyrics/{track_id}")
+def get_library_lyrics(track_id: int):
+    """Retrieve synced or plain lyrics for local track."""
+    from database import get_connection
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT filepath, title, artist FROM library_tracks WHERE id = ?", (track_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return {"has_lyrics": False, "is_synced": False, "synced": [], "plain": ""}
+    return fetch_local_track_lyrics(row[0], row[1], row[2])
+
+@app.post("/api/library/favorite/{track_id}")
+def favorite_library_track(track_id: int):
+    fav = toggle_library_favorite(track_id)
+    return {"id": track_id, "is_favorite": fav}
+
+@app.delete("/api/library/tracks/{track_id}")
+def remove_track_from_library(track_id: int):
+    delete_library_track(track_id)
+    return {"status": "deleted", "id": track_id}
+
+@app.get("/api/system/network")
+def get_system_network():
+    lan_ip = "127.0.0.1"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        lan_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+    return {
+        "lan_ip": lan_ip,
+        "local_server_url": f"http://{lan_ip}:8000",
+        "web_app_url": "https://tono.lbatistabustillos.workers.dev"
+    }
 
 # Models
 class TrackModel(BaseModel):
@@ -90,7 +303,7 @@ def prefetch_feed_streams(tracks: List[Dict[str, Any]], limit: int = 8):
 
 @app.get("/api/health")
 def health():
-    return {"status": "online", "service": "Tono Audio Core", "version": "1.0.6"}
+    return {"status": "online", "service": "Tono Audio Core Pro", "version": "2.0.0"}
 
 @app.get("/api/search")
 def search(q: str = Query(..., min_length=1), source: str = "all", background_tasks: BackgroundTasks = BackgroundTasks()):

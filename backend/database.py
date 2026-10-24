@@ -85,6 +85,41 @@ def init_db():
     );
     """)
 
+    # Library Tracks (Local Music Library)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS library_tracks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        filepath TEXT UNIQUE NOT NULL,
+        filename TEXT NOT NULL,
+        title TEXT NOT NULL,
+        artist TEXT NOT NULL,
+        album TEXT DEFAULT '',
+        album_artist TEXT DEFAULT '',
+        genre TEXT DEFAULT '',
+        year TEXT DEFAULT '',
+        track_number INTEGER DEFAULT 0,
+        duration TEXT DEFAULT '0:00',
+        duration_seconds INTEGER DEFAULT 0,
+        bitrate INTEGER DEFAULT 0,
+        codec TEXT DEFAULT '',
+        filesize INTEGER DEFAULT 0,
+        cover_url TEXT DEFAULT '',
+        play_count INTEGER DEFAULT 0,
+        is_favorite INTEGER DEFAULT 0,
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_played TIMESTAMP
+    );
+    """)
+
+    # Library Folders (Folders to scan)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS library_folders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        folder_path TEXT UNIQUE NOT NULL,
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
     conn.commit()
     conn.close()
 
@@ -262,6 +297,198 @@ def get_recent_history(limit: int = 30) -> List[Dict[str, Any]]:
     results = [dict(r) for r in rows]
     conn.close()
     return results
+
+# --- Library Management Helpers ---
+
+def add_library_folder(folder_path: str) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT OR IGNORE INTO library_folders (folder_path) VALUES (?)", (folder_path,))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+def get_library_folders() -> List[str]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT folder_path FROM library_folders ORDER BY id ASC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def remove_library_folder(folder_path: str) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM library_folders WHERE folder_path = ?", (folder_path,))
+    conn.commit()
+    conn.close()
+    return True
+
+def upsert_library_track(data: Dict[str, Any]) -> int:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO library_tracks (
+        filepath, filename, title, artist, album, album_artist, genre, year,
+        track_number, duration, duration_seconds, bitrate, codec, filesize, cover_url
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(filepath) DO UPDATE SET
+        title = excluded.title,
+        artist = excluded.artist,
+        album = excluded.album,
+        album_artist = excluded.album_artist,
+        genre = excluded.genre,
+        year = excluded.year,
+        duration = excluded.duration,
+        duration_seconds = excluded.duration_seconds,
+        bitrate = excluded.bitrate,
+        codec = excluded.codec,
+        filesize = excluded.filesize,
+        cover_url = CASE WHEN excluded.cover_url != '' THEN excluded.cover_url ELSE library_tracks.cover_url END
+    """, (
+        data["filepath"], data["filename"], data["title"], data["artist"],
+        data.get("album", ""), data.get("album_artist", ""), data.get("genre", ""),
+        data.get("year", ""), data.get("track_number", 0), data.get("duration", "0:00"),
+        data.get("duration_seconds", 0), data.get("bitrate", 0), data.get("codec", ""),
+        data.get("filesize", 0), data.get("cover_url", "")
+    ))
+    track_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return track_id
+
+def get_library_tracks(genre: str = "", artist: str = "", album: str = "", query: str = "", sort_by: str = "title") -> List[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    sql = "SELECT * FROM library_tracks WHERE 1=1"
+    params = []
+    if genre:
+        sql += " AND genre LIKE ?"
+        params.append(f"%{genre}%")
+    if artist:
+        sql += " AND (artist LIKE ? OR album_artist LIKE ?)"
+        params.extend([f"%{artist}%", f"%{artist}%"])
+    if album:
+        sql += " AND album = ?"
+        params.append(album)
+    if query:
+        sql += " AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)"
+        params.extend([f"%{query}%", f"%{query}%", f"%{query}%"])
+
+    if sort_by == "recent":
+        sql += " ORDER BY added_at DESC"
+    elif sort_by == "play_count":
+        sql += " ORDER BY play_count DESC"
+    elif sort_by == "artist":
+        sql += " ORDER BY artist COLLATE NOCASE ASC, album COLLATE NOCASE ASC, track_number ASC"
+    else:
+        sql += " ORDER BY title COLLATE NOCASE ASC"
+
+    cursor.execute(sql, params)
+    rows = cursor.fetchall()
+    results = [dict(r) for r in rows]
+    conn.close()
+    return results
+
+def get_library_albums() -> List[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT album, artist, album_artist, year, cover_url, COUNT(*) as track_count, SUM(duration_seconds) as total_duration
+    FROM library_tracks
+    WHERE album != ''
+    GROUP BY album, artist
+    ORDER BY album COLLATE NOCASE ASC
+    """)
+    rows = cursor.fetchall()
+    results = [dict(r) for r in rows]
+    conn.close()
+    return results
+
+def get_library_artists() -> List[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT artist, COUNT(DISTINCT album) as album_count, COUNT(*) as track_count, cover_url
+    FROM library_tracks
+    WHERE artist != ''
+    GROUP BY artist
+    ORDER BY artist COLLATE NOCASE ASC
+    """)
+    rows = cursor.fetchall()
+    results = [dict(r) for r in rows]
+    conn.close()
+    return results
+
+def get_library_genres() -> List[Dict[str, Any]]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT genre, COUNT(*) as track_count
+    FROM library_tracks
+    WHERE genre != ''
+    GROUP BY genre
+    ORDER BY track_count DESC
+    """)
+    rows = cursor.fetchall()
+    results = [dict(r) for r in rows]
+    conn.close()
+    return results
+
+def get_library_stats() -> Dict[str, Any]:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT 
+        COUNT(*) as total_tracks,
+        COUNT(DISTINCT album) as total_albums,
+        COUNT(DISTINCT artist) as total_artists,
+        COALESCE(SUM(filesize), 0) as total_bytes,
+        COALESCE(SUM(duration_seconds), 0) as total_duration_seconds
+    FROM library_tracks
+    """)
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        bytes_val = row["total_bytes"]
+        gb_val = round(bytes_val / (1024 * 1024 * 1024), 2)
+        hours_val = round(row["total_duration_seconds"] / 3600, 1)
+        return {
+            "total_tracks": row["total_tracks"],
+            "total_albums": row["total_albums"],
+            "total_artists": row["total_artists"],
+            "total_bytes": bytes_val,
+            "total_gb": gb_val,
+            "total_hours": hours_val
+        }
+    return {"total_tracks": 0, "total_albums": 0, "total_artists": 0, "total_gb": 0, "total_hours": 0}
+
+def toggle_library_favorite(track_id: int) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE library_tracks SET is_favorite = 1 - is_favorite WHERE id = ?", (track_id,))
+    cursor.execute("SELECT is_favorite FROM library_tracks WHERE id = ?", (track_id,))
+    row = cursor.fetchone()
+    conn.commit()
+    conn.close()
+    return bool(row[0]) if row else False
+
+def increment_library_play(track_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE library_tracks SET play_count = play_count + 1, last_played = CURRENT_TIMESTAMP WHERE id = ?", (track_id,))
+    conn.commit()
+    conn.close()
+
+def delete_library_track(track_id: int) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM library_tracks WHERE id = ?", (track_id,))
+    conn.commit()
+    conn.close()
+    return True
 
 if __name__ == "__main__":
     init_db()

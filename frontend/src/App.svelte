@@ -4,7 +4,7 @@
     Play, Pause, SkipForward, SkipBack, Shuffle, Repeat, Volume1, Volume2, VolumeX,
     Search, Heart, Music, ListMusic, Download, Disc, Clock, Mic2, Home,
     Library, HardDrive, Sparkles, User, Info, X, Check, Disc3, Settings, Folder,
-    Maximize2, Minimize2, SlidersHorizontal, Plus, Radio
+    Maximize2, Minimize2, SlidersHorizontal, Plus, Radio, Sun, Moon, Upload, FolderPlus, Smartphone, RefreshCw, Trash2, Tag, Layers
   } from 'lucide-svelte';
 
   // --- Navigation & Views ---
@@ -70,6 +70,38 @@
   let forYouData = null;
   let isLoadingForYou = false;
   let matchedArtist = null;
+
+  // --- Theme Engine (Ultra-Minimalist Dark / Light Mode) ---
+  let theme = 'dark';
+  function toggleTheme() {
+    theme = theme === 'dark' ? 'light' : 'dark';
+    if (typeof document !== 'undefined') {
+      document.documentElement.setAttribute('data-theme', theme);
+    }
+    try {
+      localStorage.setItem('tono_theme', theme);
+    } catch (e) {}
+    showToast(theme === 'dark' ? '🌙 Modo Oscuro activado' : '☀️ Modo Claro activado');
+  }
+
+  // --- Local Music Library State (Software Reproductor Pro) ---
+  let libraryTracks = [];
+  let libraryAlbums = [];
+  let libraryArtists = [];
+  let libraryGenres = [];
+  let libraryStats = { total_tracks: 0, total_albums: 0, total_artists: 0, total_gb: 0, total_hours: 0 };
+  let libraryFolders = [];
+  let librarySubTab = 'tracks'; // 'tracks' | 'albums' | 'artists' | 'genres'
+  let libraryQuery = '';
+  let librarySort = 'title';
+  let isScanningLibrary = false;
+  let isUploadingFiles = false;
+  let showFolderModal = false;
+  let showMobileModal = false;
+  let newFolderInput = '';
+  let networkInfo = { lan_ip: '127.0.0.1', local_server_url: 'http://127.0.0.1:8000' };
+  let isDraggingOver = false;
+  let fileInputRef;
   let toastMessage = '';
   let toastTimeout;
   const prefetchedSet = new Set();
@@ -86,12 +118,21 @@
   const API_BASE = RAW_API ? `${RAW_API}/api` : '/api';
 
   onMount(async () => {
+    try {
+      theme = localStorage.getItem('tono_theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', theme);
+    } catch (e) {}
+
     await Promise.all([
       fetchTrending(),
       fetchFavorites(),
       fetchPlaylists(),
       fetchStorageStats(),
-      loadForYouFeed()
+      loadForYouFeed(),
+      fetchLibraryStats(),
+      fetchLibraryTracks(),
+      fetchLibraryFolders(),
+      fetchNetworkInfo()
     ]);
 
     // Media Session API for Keyboard Media Keys & Windows Controls
@@ -384,6 +425,185 @@
     showToast('🔊 Salida de audio restablecida');
   }
 
+  // --- Local Library Core Functions ---
+  async function fetchLibraryStats() {
+    try {
+      const res = await fetch(`${API_BASE}/library/stats`);
+      if (res.ok) libraryStats = await res.json();
+    } catch (e) { console.warn(e); }
+  }
+
+  async function fetchLibraryTracks() {
+    try {
+      const res = await fetch(`${API_BASE}/library/tracks?q=${encodeURIComponent(libraryQuery)}&sort_by=${librarySort}`);
+      if (res.ok) {
+        const data = await res.json();
+        libraryTracks = data.tracks || [];
+      }
+    } catch (e) { console.warn(e); }
+  }
+
+  async function fetchLibraryAlbums() {
+    try {
+      const res = await fetch(`${API_BASE}/library/albums`);
+      if (res.ok) {
+        const data = await res.json();
+        libraryAlbums = data.albums || [];
+      }
+    } catch (e) { console.warn(e); }
+  }
+
+  async function fetchLibraryArtists() {
+    try {
+      const res = await fetch(`${API_BASE}/library/artists`);
+      if (res.ok) {
+        const data = await res.json();
+        libraryArtists = data.artists || [];
+      }
+    } catch (e) { console.warn(e); }
+  }
+
+  async function fetchLibraryGenres() {
+    try {
+      const res = await fetch(`${API_BASE}/library/genres`);
+      if (res.ok) {
+        const data = await res.json();
+        libraryGenres = data.genres || [];
+      }
+    } catch (e) { console.warn(e); }
+  }
+
+  async function fetchLibraryFolders() {
+    try {
+      const res = await fetch(`${API_BASE}/library/folders`);
+      if (res.ok) {
+        const data = await res.json();
+        libraryFolders = data.folders || [];
+      }
+    } catch (e) { console.warn(e); }
+  }
+
+  async function fetchNetworkInfo() {
+    try {
+      const res = await fetch(`${API_BASE}/system/network`);
+      if (res.ok) networkInfo = await res.json();
+    } catch (e) { console.warn(e); }
+  }
+
+  async function triggerLibraryScan() {
+    isScanningLibrary = true;
+    showToast('🔍 Escaneando carpetas de música...');
+    try {
+      await fetch(`${API_BASE}/library/scan`, { method: 'POST' });
+      setTimeout(async () => {
+        await Promise.all([
+          fetchLibraryTracks(),
+          fetchLibraryAlbums(),
+          fetchLibraryArtists(),
+          fetchLibraryGenres(),
+          fetchLibraryStats()
+        ]);
+        isScanningLibrary = false;
+        showToast(`✅ Biblioteca actualizada (${libraryStats.total_tracks} pistas)`);
+      }, 1500);
+    } catch (e) {
+      console.error(e);
+      isScanningLibrary = false;
+    }
+  }
+
+  async function handleFileUpload(files) {
+    if (!files || files.length === 0) return;
+    isUploadingFiles = true;
+    showToast(`Subiendo ${files.length} archivo(s)...`);
+    const formData = new FormData();
+    for (let i = 0; i < files.length; i++) {
+      formData.append('files', files[i]);
+    }
+    try {
+      const res = await fetch(`${API_BASE}/library/upload`, {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      showToast(`✅ ${data.uploaded} canciones añadidas a tu biblioteca`);
+      await Promise.all([
+        fetchLibraryTracks(),
+        fetchLibraryStats()
+      ]);
+    } catch (e) {
+      console.error('Upload error:', e);
+      showToast('Error al subir canciones');
+    } finally {
+      isUploadingFiles = false;
+      isDraggingOver = false;
+    }
+  }
+
+  async function addFolder() {
+    const f = newFolderInput.trim();
+    if (!f) return;
+    try {
+      const res = await fetch(`${API_BASE}/library/folders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder_path: f })
+      });
+      if (res.ok) {
+        newFolderInput = '';
+        showToast('📁 Carpeta vinculada');
+        await fetchLibraryFolders();
+        triggerLibraryScan();
+      } else {
+        showToast('Ruta no encontrada en disco');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function removeFolder(fPath) {
+    try {
+      await fetch(`${API_BASE}/library/folders?folder_path=${encodeURIComponent(fPath)}`, { method: 'DELETE' });
+      showToast('Carpeta desvinculada');
+      await fetchLibraryFolders();
+    } catch (e) { console.error(e); }
+  }
+
+  function playLocalTrack(track, queueList = null, idx = -1) {
+    const formatted = {
+      video_id: `local_${track.id}`,
+      id: track.id,
+      title: track.title,
+      artist: track.artist,
+      album: track.album || 'Sencillo Local',
+      duration: track.duration,
+      duration_seconds: track.duration_seconds,
+      thumbnail: track.cover_url ? (track.cover_url.startsWith('http') ? track.cover_url : (RAW_API + track.cover_url)) : "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40' fill='none'><rect width='40' height='40' rx='8' fill='%231e2433'/><circle cx='20' cy='20' r='10' stroke='%233b82f6' stroke-width='2'/><circle cx='20' cy='20' r='3' fill='%233b82f6'/></svg>",
+      source: 'local',
+      codec: track.codec,
+      bitrate: track.bitrate,
+      is_local: true,
+      filepath: track.filepath
+    };
+
+    const targetQueue = (queueList || libraryTracks).map(t => t.id ? ({
+      video_id: `local_${t.id}`,
+      id: t.id,
+      title: t.title,
+      artist: t.artist,
+      album: t.album,
+      duration: t.duration,
+      thumbnail: t.cover_url ? (t.cover_url.startsWith('http') ? t.cover_url : (RAW_API + t.cover_url)) : "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40' fill='none'><rect width='40' height='40' rx='8' fill='%231e2433'/><circle cx='20' cy='20' r='10' stroke='%233b82f6' stroke-width='2'/><circle cx='20' cy='20' r='3' fill='%233b82f6'/></svg>",
+      source: 'local',
+      codec: t.codec,
+      is_local: true
+    }) : t);
+
+    const targetIdx = idx >= 0 ? idx : targetQueue.findIndex(t => t.id === track.id);
+    playTrack(formatted, targetQueue, targetIdx);
+  }
+
   // --- Discovery & Smart Radio Engine ---
   async function loadForYouFeed() {
     isLoadingForYou = true;
@@ -557,6 +777,24 @@
 
     await tick();
     if (audioElement) {
+      if (track.is_local || track.source === 'local') {
+        try {
+          audioElement.src = `${API_BASE}/library/stream/${track.id}`;
+          audioElement.playbackRate = playbackSpeed;
+          await audioElement.play();
+          isPlaying = true;
+          fetch(`${API_BASE}/library/lyrics/${track.id}`)
+            .then(res => res.json())
+            .then(data => { lyricsData = data; })
+            .catch(console.warn);
+        } catch (err) {
+          console.error('Local stream error:', err);
+        } finally {
+          isLoadingAudio = false;
+        }
+        return;
+      }
+
       const queryParams = new URLSearchParams({
         source: track.source || 'youtube',
         title: track.title || '',
@@ -780,6 +1018,25 @@
   }
 </script>
 
+<svelte:window 
+  on:dragover|preventDefault={() => isDraggingOver = true}
+  on:dragleave|preventDefault={(e) => { if (!e.relatedTarget) isDraggingOver = false; }}
+  on:drop|preventDefault={(e) => {
+    isDraggingOver = false;
+    if (e.dataTransfer && e.dataTransfer.files) {
+      handleFileUpload(e.dataTransfer.files);
+    }
+  }}
+/>
+
+{#if isDraggingOver}
+  <div style="position: fixed; inset: 0; background: rgba(59, 130, 246, 0.25); backdrop-filter: blur(14px); border: 3px dashed #3b82f6; z-index: 999; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none;">
+    <Upload size={64} color="#3b82f6" />
+    <h3 style="font-size: 1.9rem; font-weight: 900; color: #fff; margin-top: 16px;">Suelta tus canciones de música aquí</h3>
+    <p style="color: #cbd5e1; font-size: 0.95rem; margin-top: 6px;">Se indexarán automáticamente con carátulas y metadatos en tu disco</p>
+  </div>
+{/if}
+
 <!-- Hidden Audio Element -->
 <audio 
   bind:this={audioElement}
@@ -789,6 +1046,129 @@
   on:playing={() => isLoadingAudio = false}
   on:error={handleAudioError}
 ></audio>
+
+<!-- MODAL: GESTOR DE CARPETAS DE MÚSICA -->
+{#if showFolderModal}
+  <div 
+    style="position: fixed; inset: 0; background: rgba(0,0,0,0.75); backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 20px;"
+    on:click={() => showFolderModal = false}
+    role="dialog"
+    tabindex="-1"
+  >
+    <div 
+      style="background: var(--bg-surface); width: 100%; max-width: 520px; border-radius: 16px; border: 1px solid var(--border-subtle); padding: 28px; box-shadow: 0 24px 60px rgba(0,0,0,0.8); max-height: 85vh; overflow-y: auto;"
+      on:click={(e) => e.stopPropagation()}
+    >
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <div>
+          <h3 style="font-size: 1.3rem; font-weight: 800; color: var(--text-base);">Vincular Carpetas de Música</h3>
+          <p style="font-size: 0.78rem; color: var(--text-subdued); margin-top: 2px;">Tono indexará todas las canciones y discos de estas rutas.</p>
+        </div>
+        <button on:click={() => showFolderModal = false} style="background: transparent; border: none; color: var(--text-muted); cursor: pointer;"><X size={18} /></button>
+      </div>
+
+      <!-- ADD FOLDER INPUT -->
+      <div style="display: flex; gap: 8px; margin-bottom: 20px;">
+        <input 
+          type="text" 
+          placeholder="Ej: D:\Musica o C:\Users\...\Music" 
+          bind:value={newFolderInput}
+          style="flex: 1; padding: 9px 14px; border-radius: 8px; background: var(--bg-card); border: 1px solid var(--border-subtle); color: var(--text-base); font-size: 0.85rem; outline: none;"
+        />
+        <button 
+          type="button"
+          on:click={addFolder}
+          style="padding: 9px 18px; border-radius: 8px; background: #3b82f6; border: none; color: #fff; font-weight: 800; font-size: 0.85rem; cursor: pointer;"
+        >
+          Añadir
+        </button>
+      </div>
+
+      <!-- FOLDERS LIST -->
+      <div style="font-size: 0.78rem; font-weight: 800; color: var(--text-muted); margin-bottom: 10px; text-transform: uppercase;">Carpetas Vinculadas</div>
+      <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px;">
+        {#each libraryFolders as fPath}
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-radius: 8px; background: var(--bg-card); border: 1px solid var(--border-subtle);">
+            <div style="display: flex; align-items: center; gap: 10px; overflow: hidden;">
+              <Folder size={16} color="#3b82f6" />
+              <span style="font-size: 0.82rem; font-weight: 600; color: var(--text-base); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{fPath}</span>
+            </div>
+            <button 
+              type="button" 
+              on:click={() => removeFolder(fPath)}
+              style="background: transparent; border: none; color: #ef4444; cursor: pointer; padding: 4px;"
+            >
+              <Trash2 size={15} />
+            </button>
+          </div>
+        {/each}
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button 
+          type="button" 
+          on:click={triggerLibraryScan}
+          style="padding: 9px 18px; border-radius: 8px; background: #3b82f6; border: none; color: #fff; font-weight: 800; font-size: 0.85rem; cursor: pointer; display: flex; align-items: center; gap: 6px;"
+        >
+          <RefreshCw size={14} class={isScanningLibrary ? 'animate-spin' : ''} /> Escanear Ahora
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- MODAL: CONEXIÓN CELULAR / LAN STREAMING -->
+{#if showMobileModal}
+  <div 
+    style="position: fixed; inset: 0; background: rgba(0,0,0,0.75); backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 20px;"
+    on:click={() => showMobileModal = false}
+    role="dialog"
+    tabindex="-1"
+  >
+    <div 
+      style="background: var(--bg-surface); width: 100%; max-width: 480px; border-radius: 16px; border: 1px solid var(--border-subtle); padding: 28px; box-shadow: 0 24px 60px rgba(0,0,0,0.8);"
+      on:click={(e) => e.stopPropagation()}
+    >
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <div>
+          <h3 style="font-size: 1.3rem; font-weight: 800; color: var(--text-base);">Tu Servidor Personal en Vivo</h3>
+          <p style="font-size: 0.78rem; color: var(--text-subdued); margin-top: 2px;">Escucha tu música de la PC en tu celular por WiFi.</p>
+        </div>
+        <button on:click={() => showMobileModal = false} style="background: transparent; border: none; color: var(--text-muted); cursor: pointer;"><X size={18} /></button>
+      </div>
+
+      <div style="padding: 16px; background: var(--bg-card); border-radius: 12px; border: 1px solid var(--border-subtle); margin-bottom: 20px;">
+        <div style="font-size: 0.76rem; color: var(--text-muted); text-transform: uppercase; font-weight: 800; margin-bottom: 6px;">URL de Acceso Móvil (Misma red WiFi):</div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+          <code style="font-size: 1rem; color: #3b82f6; font-weight: 800; word-break: break-all;">
+            {networkInfo.local_server_url || `http://${networkInfo.lan_ip}:8000`}
+          </code>
+          <button 
+            type="button" 
+            on:click={() => { navigator.clipboard.writeText(networkInfo.local_server_url || `http://${networkInfo.lan_ip}:8000`); showToast('Enlace copiado al portapapeles'); }}
+            style="padding: 6px 12px; border-radius: 6px; background: #3b82f6; border: none; color: #fff; font-size: 0.75rem; font-weight: 700; cursor: pointer; flex-shrink: 0;"
+          >
+            Copiar
+          </button>
+        </div>
+      </div>
+
+      <div style="padding: 14px; background: rgba(59, 130, 246, 0.08); border-radius: 10px; border: 1px solid rgba(59, 130, 246, 0.2); font-size: 0.78rem; color: var(--text-subdued); line-height: 1.5; margin-bottom: 20px;">
+        💡 <b>Cómo usarlo:</b> Abre el navegador en tu teléfono (conectado al mismo WiFi de tu casa) y entra a ese enlace. Podrás escuchar toda tu música guardada en la computadora a máxima velocidad sin gastar datos.
+      </div>
+
+      <div style="display: flex; justify-content: flex-end;">
+        <button 
+          type="button" 
+          on:click={() => showMobileModal = false}
+          style="padding: 9px 18px; border-radius: 8px; background: var(--bg-card); border: 1px solid var(--border-subtle); color: var(--text-base); font-weight: 700; font-size: 0.85rem; cursor: pointer;"
+        >
+          Entendido
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <!-- SONG CREDITS MODAL (SPOTIFY STYLE) -->
 {#if showCreditsModal}
@@ -1616,6 +1996,22 @@
         <span>Explorar & Buscar</span>
       </button>
 
+      <!-- LOCAL MUSIC LIBRARY BUTTON -->
+      <button 
+        on:click={() => { activeTab = 'library'; fetchLibraryTracks(); }}
+        style="width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; border: none; background: {activeTab === 'library' ? 'var(--bg-highlight)' : 'transparent'}; color: {activeTab === 'library' ? 'var(--text-base)' : 'var(--text-subdued)'}; font-weight: 700; border-radius: 8px; cursor: pointer; transition: all 0.15s;"
+      >
+        <div style="display: flex; align-items: center; gap: 14px;">
+          <HardDrive size={20} color={activeTab === 'library' ? 'var(--brand-primary)' : 'currentColor'} />
+          <span>Mi Biblioteca</span>
+        </div>
+        {#if libraryStats.total_tracks > 0}
+          <span style="font-size: 0.72rem; padding: 2px 7px; border-radius: 500px; background: rgba(59, 130, 246, 0.18); color: #60a5fa; font-weight: 800;">
+            {libraryStats.total_tracks}
+          </span>
+        {/if}
+      </button>
+
       <button 
         on:click={() => activeTab = 'lyrics'}
         style="width: 100%; display: flex; align-items: center; gap: 14px; padding: 11px 14px; border: none; background: {activeTab === 'lyrics' ? '#22283a' : 'transparent'}; color: {activeTab === 'lyrics' ? '#fff' : '#94a3b8'}; font-weight: 700; border-radius: 7px; cursor: pointer; transition: all 0.15s;"
@@ -1708,7 +2104,34 @@
       </div>
 
       <!-- SOURCE TOGGLE (YOUTUBE MUSIC / SOUNDCLOUD) -->
-      <div style="display: flex; align-items: center; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <!-- THEME TOGGLE (MINIMALIST SUN / MOON) -->
+        <button 
+          type="button"
+          on:click={toggleTheme}
+          style="width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border-subtle); background: var(--bg-card); color: var(--text-base); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s;"
+          title={theme === 'dark' ? 'Cambiar a Modo Claro' : 'Cambiar a Modo Oscuro'}
+          class="hover:scale-105"
+        >
+          {#if theme === 'dark'}
+            <Sun size={17} color="#facc15" />
+          {:else}
+            <Moon size={17} color="#2563eb" />
+          {/if}
+        </button>
+
+        <!-- MOBILE STREAMING CONNECT BUTTON -->
+        <button 
+          type="button"
+          on:click={() => showMobileModal = true}
+          style="padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border-subtle); background: var(--bg-card); color: var(--text-base); font-size: 0.8rem; font-weight: 700; display: flex; align-items: center; gap: 7px; cursor: pointer;"
+          class="hover:border-blue-500"
+          title="Conecta tu Celular a tu PC"
+        >
+          <Smartphone size={15} color="#3b82f6" />
+          <span>Celular / LAN</span>
+        </button>
+
         <button 
           on:click={() => { searchSource = 'all'; if (searchQuery) performSearch(); }}
           style="padding: 7px 15px; border-radius: 8px; font-size: 0.8rem; font-weight: 700; border: none; cursor: pointer; background: {searchSource === 'all' ? '#3b82f6' : '#151822'}; color: {searchSource === 'all' ? '#fff' : '#94a3b8'}; transition: all 0.15s;"
@@ -2226,75 +2649,261 @@
           {/if}
         </div>
 
-      <!-- LIBRARY TAB -->
+      <!-- LOCAL MUSIC LIBRARY HUB (SOFTWARE REPRODUCTOR PRO) -->
       {:else if activeTab === 'library'}
         <div>
-          <!-- PLAYLIST HEADER BANNER -->
-          <div style="display: flex; align-items: flex-end; gap: 24px; margin-bottom: 28px; padding: 20px 0;">
-            <div style="width: 180px; height: 180px; border-radius: 14px; background: linear-gradient(135deg, #1d4ed8, #38bdf8); display: flex; align-items: center; justify-content: center; box-shadow: 0 14px 30px rgba(29, 78, 216, 0.45);">
-              <Heart size={80} color="#fff" fill="#fff" />
-            </div>
-            <div>
-              <span style="font-size: 0.78rem; font-weight: 800; text-transform: uppercase; color: #60a5fa; letter-spacing: 1px;">Tu Colección Personal</span>
-              <h2 style="font-size: 3.2rem; font-weight: 900; letter-spacing: -1.5px; line-height: 1.1; margin: 6px 0;">Pistas Guardadas</h2>
-              <div style="color: #94a3b8; font-size: 0.9rem; font-weight: 600;">
-                {favorites.length} canciones archivadas en Disco D
+          <!-- LIBRARY HEADER HERO -->
+          <div style="background: linear-gradient(135deg, rgba(37, 99, 235, 0.15) 0%, rgba(14, 17, 26, 0.6) 100%); border: 1px solid var(--border-subtle); border-radius: 16px; padding: 28px; margin-bottom: 28px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 20px;">
+            <div style="display: flex; align-items: center; gap: 22px;">
+              <div style="width: 72px; height: 72px; border-radius: 16px; background: linear-gradient(135deg, #2563eb, #38bdf8); display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 24px rgba(37, 99, 235, 0.4); flex-shrink: 0;">
+                <HardDrive size={36} color="#fff" />
+              </div>
+              <div>
+                <span style="font-size: 0.76rem; font-weight: 800; text-transform: uppercase; color: #60a5fa; letter-spacing: 0.8px;">Software Reproductor Hi-Fi</span>
+                <h2 style="font-size: 2.2rem; font-weight: 900; letter-spacing: -0.8px; margin: 2px 0;">Mi Biblioteca Local</h2>
+                <div style="color: var(--text-subdued); font-size: 0.85rem; display: flex; align-items: center; gap: 10px; margin-top: 4px;">
+                  <span><b>{libraryStats.total_tracks}</b> Canciones</span>
+                  <span>·</span>
+                  <span><b>{libraryStats.total_albums}</b> Álbumes</span>
+                  <span>·</span>
+                  <span><b>{libraryStats.total_gb} GB</b> en Disco</span>
+                  <span>·</span>
+                  <span><b>{libraryStats.total_hours}</b> Horas</span>
+                </div>
               </div>
             </div>
-          </div>
 
-          <!-- PLAY BUTTON -->
-          <div style="margin-bottom: 20px;">
-            <button 
-              type="button"
-              on:click={() => { if (favorites.length > 0) playTrack(favorites[0], favorites, 0); }}
-              style="width: 54px; height: 54px; border-radius: 50%; background: #3b82f6; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 8px 24px rgba(59, 130, 246, 0.45); transition: transform 0.15s;"
-              class="hover:scale-105"
-            >
-              <Play size={24} color="#fff" fill="#fff" style="margin-left: 2px;" />
-            </button>
-          </div>
+            <!-- ACTION BUTTONS -->
+            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+              <button 
+                type="button"
+                on:click={triggerLibraryScan}
+                disabled={isScanningLibrary}
+                style="padding: 10px 18px; border-radius: 500px; background: #3b82f6; border: none; color: #fff; font-weight: 800; font-size: 0.85rem; display: flex; align-items: center; gap: 8px; cursor: pointer; box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4);"
+                class="hover:scale-105"
+              >
+                <RefreshCw size={15} class={isScanningLibrary ? 'animate-spin' : ''} />
+                {isScanningLibrary ? 'Escaneando...' : 'Escanear Carpetas'}
+              </button>
 
-          <!-- FAVORITES TABLE -->
-          {#if favorites.length === 0}
-            <div style="padding: 40px; text-align: center; color: #64748b;">
-              <Heart size={44} style="margin: 0 auto 12px auto; opacity: 0.3;" />
-              <p>Aún no has guardado canciones. Presiona el corazón en cualquier resultado para archivarlo aquí.</p>
+              <button 
+                type="button"
+                on:click={() => showFolderModal = true}
+                style="padding: 10px 18px; border-radius: 500px; background: var(--bg-card); border: 1px solid var(--border-subtle); color: var(--text-base); font-weight: 700; font-size: 0.85rem; display: flex; align-items: center; gap: 8px; cursor: pointer;"
+                class="hover:border-blue-500"
+              >
+                <FolderPlus size={16} /> Vincular Carpetas
+              </button>
+
+              <button 
+                type="button"
+                on:click={() => fileInputRef.click()}
+                style="padding: 10px 18px; border-radius: 500px; background: var(--bg-card); border: 1px solid var(--border-subtle); color: var(--text-base); font-weight: 700; font-size: 0.85rem; display: flex; align-items: center; gap: 8px; cursor: pointer;"
+                class="hover:border-blue-500"
+              >
+                <Upload size={16} /> Subir Archivos
+              </button>
+              <input 
+                type="file" 
+                multiple 
+                accept="audio/*" 
+                bind:this={fileInputRef} 
+                on:change={(e) => handleFileUpload(e.target.files)} 
+                style="display: none;" 
+              />
             </div>
-          {:else}
-            <div style="display: flex; flex-direction: column;">
-              {#each favorites as track, idx}
-                <div 
-                  role="row"
-                  tabindex="0"
-                  on:click={() => playTrack(track, favorites, idx)}
-                  on:keydown={(e) => { if (e.key === 'Enter') playTrack(track, favorites, idx); }}
-                  style="display: grid; grid-template-columns: 44px 4fr 3fr 100px; padding: 10px 16px; border-radius: 8px; align-items: center; cursor: pointer; border: none; background: transparent; color: #fff; text-align: left; transition: background 0.15s;"
-                  class="hover:bg-[#161a26]"
+          </div>
+
+          <!-- SUBTABS & FILTER BAR -->
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 22px; flex-wrap: wrap; gap: 14px;">
+            <div style="display: flex; gap: 8px;">
+              <button 
+                type="button"
+                on:click={() => { librarySubTab = 'tracks'; fetchLibraryTracks(); }}
+                style="padding: 8px 16px; border-radius: 8px; font-size: 0.82rem; font-weight: 700; border: none; cursor: pointer; background: {librarySubTab === 'tracks' ? '#3b82f6' : 'var(--bg-card)'}; color: {librarySubTab === 'tracks' ? '#fff' : 'var(--text-subdued)'};"
+              >
+                Canciones ({libraryTracks.length})
+              </button>
+              <button 
+                type="button"
+                on:click={() => { librarySubTab = 'albums'; fetchLibraryAlbums(); }}
+                style="padding: 8px 16px; border-radius: 8px; font-size: 0.82rem; font-weight: 700; border: none; cursor: pointer; background: {librarySubTab === 'albums' ? '#3b82f6' : 'var(--bg-card)'}; color: {librarySubTab === 'albums' ? '#fff' : 'var(--text-subdued)'};"
+              >
+                Álbumes ({libraryAlbums.length})
+              </button>
+              <button 
+                type="button"
+                on:click={() => { librarySubTab = 'artists'; fetchLibraryArtists(); }}
+                style="padding: 8px 16px; border-radius: 8px; font-size: 0.82rem; font-weight: 700; border: none; cursor: pointer; background: {librarySubTab === 'artists' ? '#3b82f6' : 'var(--bg-card)'}; color: {librarySubTab === 'artists' ? '#fff' : 'var(--text-subdued)'};"
+              >
+                Artistas ({libraryArtists.length})
+              </button>
+              <button 
+                type="button"
+                on:click={() => { librarySubTab = 'genres'; fetchLibraryGenres(); }}
+                style="padding: 8px 16px; border-radius: 8px; font-size: 0.82rem; font-weight: 700; border: none; cursor: pointer; background: {librarySubTab === 'genres' ? '#3b82f6' : 'var(--bg-card)'}; color: {librarySubTab === 'genres' ? '#fff' : 'var(--text-subdued)'};"
+              >
+                Géneros ({libraryGenres.length})
+              </button>
+            </div>
+
+            <!-- SEARCH INSIDE LOCAL LIBRARY -->
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <input 
+                type="text" 
+                placeholder="Filtrar en tu música local..." 
+                bind:value={libraryQuery}
+                on:input={() => fetchLibraryTracks()}
+                style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 7px 14px; color: var(--text-base); font-size: 0.82rem; outline: none; width: 220px;"
+              />
+              <select 
+                bind:value={librarySort} 
+                on:change={() => fetchLibraryTracks()}
+                style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 7px 12px; color: var(--text-base); font-size: 0.82rem; outline: none;"
+              >
+                <option value="title">Título (A-Z)</option>
+                <option value="artist">Artista (A-Z)</option>
+                <option value="play_count">Más Escuchadas</option>
+                <option value="recent">Recientes</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- SUBTAB CONTENT -->
+          {#if librarySubTab === 'tracks'}
+            {#if libraryTracks.length === 0}
+              <div style="text-align: center; padding: 60px 0; background: var(--bg-card); border-radius: 16px; border: 1px dashed var(--border-subtle);">
+                <Disc size={44} color="#60a5fa" style="margin: 0 auto 12px; opacity: 0.6;" />
+                <h4 style="font-size: 1.2rem; font-weight: 800; color: var(--text-base);">Tu biblioteca local está lista</h4>
+                <p style="font-size: 0.85rem; color: var(--text-subdued); margin: 6px auto 18px; max-width: 440px;">Arrastra tus archivos de música a esta ventana o vincula una carpeta de tu disco duro para indexar tus canciones.</p>
+                <button 
+                  type="button" 
+                  on:click={() => showFolderModal = true}
+                  style="padding: 10px 20px; border-radius: 500px; background: #3b82f6; border: none; color: #fff; font-weight: 800; font-size: 0.85rem; cursor: pointer;"
                 >
-                  <span style="color: #64748b; font-size: 0.85rem;">{idx + 1}</span>
-                  <div style="display: flex; align-items: center; gap: 12px; overflow: hidden; padding-right: 16px;">
-                    <img src={track.thumbnail} alt={track.title} style="width: 44px; height: 44px; border-radius: 6px; object-fit: cover;" />
-                    <div style="overflow: hidden;">
-                      <div style="font-weight: 700; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: {currentTrack?.video_id === track.video_id ? '#60a5fa' : '#fff'};">
-                        {track.title}
-                      </div>
-                      <div 
-                        on:click={(e) => openArtistProfile(track.artist, e)}
-                        style="font-size: 0.78rem; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;"
-                        class="hover:underline"
-                      >
-                        {track.artist}
+                  Vincular Carpeta de Música
+                </button>
+              </div>
+            {:else}
+              <!-- TRACKS TABLE -->
+              <div style="display: flex; flex-direction: column;">
+                <div style="display: grid; grid-template-columns: 44px 4fr 3fr 100px 110px 100px; padding: 10px 16px; border-bottom: 1px solid var(--border-subtle); color: var(--text-muted); font-size: 0.74rem; font-weight: 800; text-transform: uppercase;">
+                  <span>#</span>
+                  <span>Canción</span>
+                  <span>Álbum</span>
+                  <span>Calidad</span>
+                  <span>Reproducciones</span>
+                  <span style="text-align: right;"><Clock size={13} style="display: inline;" /></span>
+                </div>
+
+                {#each libraryTracks as track, idx}
+                  <div 
+                    role="row"
+                    tabindex="0"
+                    on:click={() => playLocalTrack(track, libraryTracks, idx)}
+                    on:keydown={(e) => { if (e.key === 'Enter') playLocalTrack(track, libraryTracks, idx); }}
+                    style="display: grid; grid-template-columns: 44px 4fr 3fr 100px 110px 100px; padding: 10px 16px; border-radius: 8px; align-items: center; cursor: pointer; border: none; background: transparent; color: var(--text-base); text-align: left; transition: background 0.15s;"
+                    class="hover:bg-[var(--bg-card-hover)]"
+                  >
+                    <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 600;">
+                      {#if currentTrack && currentTrack.id === track.id && isPlaying}
+                        <span style="color: #3b82f6;">▶</span>
+                      {:else}
+                        {idx + 1}
+                      {/if}
+                    </span>
+
+                    <div style="display: flex; align-items: center; gap: 12px; overflow: hidden; padding-right: 16px;">
+                      {#if track.cover_url}
+                        <img src={track.cover_url.startsWith('http') ? track.cover_url : (RAW_API + track.cover_url)} alt={track.title} style="width: 44px; height: 44px; border-radius: 6px; object-fit: cover; flex-shrink: 0;" />
+                      {:else}
+                        <div style="width: 44px; height: 44px; border-radius: 6px; background: var(--bg-card); display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 1px solid var(--border-subtle);">
+                          <Music size={18} color="#60a5fa" />
+                        </div>
+                      {/if}
+                      <div style="overflow: hidden;">
+                        <div style="font-weight: 700; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: {currentTrack?.id === track.id ? '#60a5fa' : 'var(--text-base)'};">
+                          {track.title}
+                        </div>
+                        <div style="font-size: 0.76rem; color: var(--text-subdued);">{track.artist}</div>
                       </div>
                     </div>
+
+                    <span style="color: var(--text-subdued); font-size: 0.82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 10px;">
+                      {track.album || 'Sencillo'}
+                    </span>
+
+                    <!-- CODEC / QUALITY BADGE -->
+                    <div>
+                      <span style="font-size: 0.68rem; font-weight: 800; padding: 2px 7px; border-radius: 4px; background: rgba(59, 130, 246, 0.12); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.25);">
+                        {track.codec} {track.bitrate ? `${track.bitrate}k` : ''}
+                      </span>
+                    </div>
+
+                    <span style="font-size: 0.8rem; color: var(--text-subdued);">
+                      {track.play_count || 0} plays
+                    </span>
+
+                    <div style="display: flex; align-items: center; justify-content: flex-end; gap: 10px;">
+                      <span style="font-size: 0.8rem; color: var(--text-muted);">{track.duration}</span>
+                    </div>
                   </div>
-                  <span style="color: #94a3b8; font-size: 0.82rem;">{track.album || 'Single'}</span>
-                  <div style="display: flex; align-items: center; justify-content: flex-end; gap: 12px; color: #94a3b8;">
-                    <button type="button" on:click={(e) => toggleFavorite(track, e)} style="background: transparent; border: none; cursor: pointer; color: #3b82f6;">
-                      <Heart size={16} fill="#3b82f6" />
-                    </button>
-                    <span style="font-size: 0.82rem;">{track.duration}</span>
-                  </div>
+                {/each}
+              </div>
+            {/if}
+
+          {:else if librarySubTab === 'albums'}
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 18px;">
+              {#each libraryAlbums as alb}
+                <div 
+                  on:click={() => { libraryQuery = alb.album; librarySubTab = 'tracks'; fetchLibraryTracks(); }}
+                  style="background: var(--bg-card); padding: 14px; border-radius: 12px; cursor: pointer; border: 1px solid var(--border-subtle); text-align: left; transition: all 0.2s;"
+                  class="hover:scale-105"
+                >
+                  {#if alb.cover_url}
+                    <img src={alb.cover_url.startsWith('http') ? alb.cover_url : (RAW_API + alb.cover_url)} alt={alb.album} style="width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; margin-bottom: 10px;" />
+                  {:else}
+                    <div style="width: 100%; aspect-ratio: 1; border-radius: 8px; background: var(--bg-highlight); display: flex; align-items: center; justify-content: center; margin-bottom: 10px;">
+                      <Disc size={36} color="#60a5fa" />
+                    </div>
+                  {/if}
+                  <div style="font-weight: 700; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-base);">{alb.album}</div>
+                  <div style="font-size: 0.76rem; color: var(--text-subdued);">{alb.artist} · {alb.track_count} pistas</div>
+                </div>
+              {/each}
+            </div>
+
+          {:else if librarySubTab === 'artists'}
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 18px;">
+              {#each libraryArtists as art}
+                <div 
+                  on:click={() => { libraryQuery = art.artist; librarySubTab = 'tracks'; fetchLibraryTracks(); }}
+                  style="background: var(--bg-card); padding: 18px 14px; border-radius: 14px; cursor: pointer; border: 1px solid var(--border-subtle); text-align: center; display: flex; flex-direction: column; align-items: center; gap: 10px; transition: all 0.2s;"
+                  class="hover:scale-105"
+                >
+                  {#if art.cover_url}
+                    <img src={art.cover_url.startsWith('http') ? art.cover_url : (RAW_API + art.cover_url)} alt={art.artist} style="width: 84px; height: 84px; border-radius: 50%; object-fit: cover; border: 2px solid #3b82f6;" />
+                  {:else}
+                    <div style="width: 84px; height: 84px; border-radius: 50%; background: var(--bg-highlight); display: flex; align-items: center; justify-content: center; border: 2px solid var(--border-subtle);">
+                      <User size={32} color="#60a5fa" />
+                    </div>
+                  {/if}
+                  <div style="font-weight: 700; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; color: var(--text-base);">{art.artist}</div>
+                  <div style="font-size: 0.74rem; color: var(--text-subdued);">{art.track_count} canciones</div>
+                </div>
+              {/each}
+            </div>
+
+          {:else if librarySubTab === 'genres'}
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px;">
+              {#each libraryGenres as gen}
+                <div 
+                  on:click={() => { libraryQuery = gen.genre; librarySubTab = 'tracks'; fetchLibraryTracks(); }}
+                  style="background: var(--bg-card); padding: 16px 20px; border-radius: 12px; cursor: pointer; border: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; transition: all 0.2s;"
+                  class="hover:border-blue-500 hover:bg-[var(--bg-card-hover)]"
+                >
+                  <span style="font-weight: 700; font-size: 0.92rem; color: var(--text-base);">{gen.genre}</span>
+                  <span style="font-size: 0.76rem; color: #60a5fa; font-weight: 800;">{gen.track_count}</span>
                 </div>
               {/each}
             </div>
