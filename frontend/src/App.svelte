@@ -3,7 +3,7 @@
   import { 
     Play, Pause, SkipForward, SkipBack, Shuffle, Repeat, Volume1, Volume2, VolumeX,
     Search, Heart, Music, ListMusic, Download, Disc, Clock, Mic2, Home,
-    Library, HardDrive, Sparkles, User, Info, X, Check, Disc3
+    Library, HardDrive, Sparkles, User, Info, X, Check, Disc3, Settings, Folder
   } from 'lucide-svelte';
 
   // --- Navigation & Views ---
@@ -43,8 +43,14 @@
   let creditsData = null;
   let isLoadingCredits = false;
 
-  // Storage Stats (Drive D)
-  let storageStats = { free_gb: 0, cached_tracks_count: 0, cache_size_mb: 0 };
+  // Storage Stats & Disks Manager
+  let storageStats = { storage: 'Disco D:', free_gb: 0, cached_tracks_count: 0, cache_size_mb: 0 };
+  let showStorageModal = false;
+  let drivesData = { active_storage_dir: '', drives: [] };
+  let selectedDrive = null;
+  let customFolderName = 'Tono_Music';
+  let isSavingStorage = false;
+  let storageMessage = '';
 
   // Audio DOM element
   let audioElement;
@@ -113,6 +119,60 @@
     } catch (e) {
       console.error('Error fetching stats:', e);
     }
+  }
+
+  async function fetchDrives() {
+    try {
+      const res = await fetch(`${API_BASE}/drives`);
+      if (res.ok) {
+        drivesData = await res.json();
+        const active = drivesData.drives.find(d => d.is_active);
+        if (active) {
+          selectedDrive = active;
+        } else if (drivesData.drives.length > 0) {
+          selectedDrive = drivesData.drives[0];
+        }
+      }
+    } catch (e) {
+      console.error('Error fetching drives:', e);
+    }
+  }
+
+  async function saveStorageConfig() {
+    if (!selectedDrive) return;
+    isSavingStorage = true;
+    storageMessage = '';
+    try {
+      const res = await fetch(`${API_BASE}/settings/storage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          drive: selectedDrive.path,
+          folder_name: customFolderName.trim() || 'Tono_Music'
+        })
+      });
+      if (res.ok) {
+        storageMessage = '¡Disco y carpeta configurados exitosamente!';
+        await fetchStorageStats();
+        await fetchDrives();
+        setTimeout(() => {
+          showStorageModal = false;
+          storageMessage = '';
+        }, 1200);
+      } else {
+        const err = await res.json();
+        storageMessage = `Error: ${err.detail || 'No se pudo guardar'}`;
+      }
+    } catch (e) {
+      storageMessage = 'Error al conectar con el servidor';
+    } finally {
+      isSavingStorage = false;
+    }
+  }
+
+  function openStorageModal() {
+    fetchDrives();
+    showStorageModal = true;
   }
 
   // --- Search Handler ---
@@ -373,7 +433,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(track)
       });
-      alert(`Guardando "${track.title}" en el almacén local del Disco D.`);
+      alert(`Guardando "${track.title}" en el almacenamiento local.`);
       setTimeout(fetchStorageStats, 3500);
     } catch (err) {
       console.error(err);
@@ -510,6 +570,168 @@
   </div>
 {/if}
 
+<!-- STORAGE & DISKS MANAGER MODAL -->
+{#if showStorageModal}
+  <div 
+    style="position: fixed; inset: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(10px); display: flex; align-items: center; justify-content: center; z-index: 220; padding: 20px;"
+    on:click={() => showStorageModal = false}
+    on:keydown={(e) => { if (e.key === 'Escape') showStorageModal = false; }}
+    role="dialog"
+    tabindex="-1"
+    aria-label="Gestor de almacenamiento y discos"
+  >
+    <div 
+      style="background: #141722; width: 100%; max-width: 580px; border-radius: 20px; border: 1px solid #252c3f; padding: 28px; box-shadow: 0 24px 70px rgba(0,0,0,0.85); max-height: 90vh; overflow-y: auto;"
+      on:click={(e) => e.stopPropagation()}
+      on:keydown={() => {}}
+      role="document"
+      tabindex="-1"
+    >
+      <!-- HEADER -->
+      <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="width: 44px; height: 44px; border-radius: 12px; background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.3); display: flex; align-items: center; justify-content: center;">
+            <HardDrive size={22} color="#3b82f6" />
+          </div>
+          <div>
+            <span style="font-size: 0.72rem; color: #60a5fa; font-weight: 800; text-transform: uppercase; letter-spacing: 1px;">Configuración del Sistema</span>
+            <h3 style="font-size: 1.35rem; font-weight: 800; margin-top: 2px;">Gestor de Discos & Almacenamiento</h3>
+          </div>
+        </div>
+        <button 
+          type="button"
+          on:click={() => showStorageModal = false}
+          style="background: #1c2130; border: none; color: #94a3b8; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s;"
+          class="hover:text-white hover:bg-[#283045]"
+        >
+          <X size={18} />
+        </button>
+      </div>
+
+      <p style="color: #94a3b8; font-size: 0.85rem; line-height: 1.5; margin-bottom: 20px;">
+        Elige en qué disco duro deseas que Tono guarde tus canciones para reproducción sin conexión y memoria caché de alto rendimiento.
+      </p>
+
+      <!-- DETECTED DRIVES LIST -->
+      <div style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 24px;">
+        <div style="font-size: 0.76rem; color: #64748b; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px;">
+          Discos Detectados ({drivesData.drives.length})
+        </div>
+
+        {#each drivesData.drives as d}
+          <button 
+            type="button"
+            on:click={() => selectedDrive = d}
+            style="display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border-radius: 12px; border: 2px solid {selectedDrive?.letter === d.letter ? '#3b82f6' : '#22283a'}; background: {selectedDrive?.letter === d.letter ? 'rgba(59, 130, 246, 0.08)' : '#0d1017'}; text-align: left; cursor: pointer; transition: all 0.2s;"
+            class="hover:border-blue-400"
+          >
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+              <div style="display: flex; align-items: center; gap: 10px;">
+                <HardDrive size={18} color={selectedDrive?.letter === d.letter ? '#3b82f6' : '#64748b'} />
+                <div>
+                  <div style="font-weight: 700; font-size: 0.95rem; color: #fff;">{d.name}</div>
+                  <div style="font-size: 0.74rem; color: #64748b;">Ruta: {d.path}</div>
+                </div>
+              </div>
+              
+              <div style="display: flex; align-items: center; gap: 8px;">
+                {#if d.is_recommended}
+                  <span style="background: rgba(16, 185, 129, 0.15); color: #34d399; font-size: 0.68rem; font-weight: 800; padding: 3px 8px; border-radius: 6px; border: 1px solid rgba(16, 185, 129, 0.3);">
+                    Recomendado
+                  </span>
+                {/if}
+                {#if d.is_active}
+                  <span style="background: rgba(59, 130, 246, 0.2); color: #60a5fa; font-size: 0.68rem; font-weight: 800; padding: 3px 8px; border-radius: 6px; border: 1px solid rgba(59, 130, 246, 0.4);">
+                    En Uso
+                  </span>
+                {/if}
+              </div>
+            </div>
+
+            <!-- STORAGE USAGE PROGRESS BAR -->
+            <div style="margin-top: 4px;">
+              <div style="display: flex; justify-content: space-between; font-size: 0.74rem; color: #94a3b8; margin-bottom: 4px;">
+                <span style="color: #60a5fa; font-weight: 700;">{d.free_gb} GB libres</span>
+                <span>{d.used_gb} GB usados de {d.total_gb} GB ({d.percent_used}%)</span>
+              </div>
+              <div style="width: 100%; height: 6px; background: #1c2233; border-radius: 3px; overflow: hidden;">
+                <div style="height: 100%; width: {d.percent_used}%; background: {d.percent_used > 88 ? '#ef4444' : '#3b82f6'}; border-radius: 3px;"></div>
+              </div>
+            </div>
+          </button>
+        {/each}
+      </div>
+
+      <!-- FOLDER SETTINGS -->
+      <div style="margin-bottom: 24px;">
+        <label for="storage-folder-input" style="display: block; font-size: 0.76rem; color: #64748b; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px;">
+          Carpeta de Almacenamiento
+        </label>
+        <div style="display: flex; align-items: center; gap: 8px; background: #0d1017; border: 1px solid #23283a; border-radius: 10px; padding: 8px 14px;">
+          <Folder size={18} color="#60a5fa" />
+          <span style="color: #64748b; font-family: monospace; font-size: 0.86rem;">{selectedDrive ? selectedDrive.path : 'D:\\'}</span>
+          <input 
+            id="storage-folder-input"
+            type="text" 
+            bind:value={customFolderName} 
+            placeholder="Tono_Music" 
+            style="flex: 1; background: transparent; border: none; color: #fff; font-family: monospace; font-size: 0.86rem; outline: none;"
+          />
+        </div>
+        <p style="font-size: 0.72rem; color: #64748b; margin-top: 6px;">
+          Ruta final completa: <span style="color: #94a3b8; font-family: monospace;">{selectedDrive ? `${selectedDrive.path}${customFolderName || 'Tono_Music'}` : '...'}</span>
+        </p>
+      </div>
+
+      <!-- CURRENT CACHE STATS -->
+      <div style="padding: 12px 16px; background: rgba(255, 255, 255, 0.03); border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.06); display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;">
+        <div>
+          <div style="font-size: 0.72rem; color: #64748b; font-weight: 700; text-transform: uppercase;">Estado de la Caché</div>
+          <div style="font-size: 0.95rem; font-weight: 800; color: #fff; margin-top: 2px;">
+            {storageStats.cached_tracks_count || 0} canciones almacenadas ({storageStats.cache_size_mb || 0} MB)
+          </div>
+        </div>
+        <div style="font-size: 0.75rem; color: #34d399; font-weight: 700; display: flex; align-items: center; gap: 6px;">
+          <Check size={16} /> Listo para Offline
+        </div>
+      </div>
+
+      <!-- STATUS MESSAGE -->
+      {#if storageMessage}
+        <div style="padding: 10px 14px; border-radius: 8px; font-size: 0.82rem; font-weight: 700; margin-bottom: 16px; text-align: center; background: {storageMessage.startsWith('Error') ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.15)'}; color: {storageMessage.startsWith('Error') ? '#f87171' : '#34d399'}; border: 1px solid {storageMessage.startsWith('Error') ? 'rgba(239, 68, 68, 0.3)' : 'rgba(16, 185, 129, 0.3)'};">
+          {storageMessage}
+        </div>
+      {/if}
+
+      <!-- ACTIONS -->
+      <div style="display: flex; justify-content: flex-end; gap: 12px;">
+        <button 
+          type="button"
+          on:click={() => showStorageModal = false}
+          style="padding: 10px 18px; border-radius: 8px; background: #1c2130; border: none; color: #94a3b8; font-weight: 700; font-size: 0.85rem; cursor: pointer; transition: all 0.15s;"
+          class="hover:bg-[#283045] hover:text-white"
+        >
+          Cerrar
+        </button>
+        <button 
+          type="button"
+          on:click={saveStorageConfig}
+          disabled={isSavingStorage}
+          style="padding: 10px 22px; border-radius: 8px; background: #3b82f6; border: none; color: #fff; font-weight: 800; font-size: 0.85rem; cursor: pointer; display: flex; align-items: center; gap: 8px; box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4); transition: transform 0.15s;"
+          class="hover:scale-105"
+        >
+          {#if isSavingStorage}
+            <Disc size={16} class="animate-spin" /> Guardando...
+          {:else}
+            <Check size={16} /> Aplicar Disco & Carpeta
+          {/if}
+        </button>
+      </div>
+
+    </div>
+  </div>
+{/if}
+
 <div style="display: flex; height: 100vh; width: 100vw; background: #090a0f; color: #fff;">
   
   <!-- LEFT SIDEBAR -->
@@ -596,18 +818,24 @@
         {/each}
       </div>
 
-      <!-- STORAGE HEALTH WIDGET (DRIVE D) -->
-      <div style="margin-top: auto; padding: 10px 12px; background: #0c0e14; border-radius: 8px; border: 1px solid #1c2233; font-size: 0.74rem;">
+      <!-- STORAGE HEALTH WIDGET (DRIVE SELECTOR) -->
+      <button 
+        type="button"
+        on:click={openStorageModal}
+        style="margin-top: auto; padding: 10px 12px; background: #0c0e14; border-radius: 8px; border: 1px solid #1c2233; font-size: 0.74rem; text-align: left; cursor: pointer; transition: all 0.2s; width: 100%; display: block;"
+        class="hover:border-blue-500 hover:bg-[#121622]"
+      >
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
           <span style="color: #94a3b8; display: flex; align-items: center; gap: 6px;">
-            <HardDrive size={14} color="#3b82f6" /> Disco D:
+            <HardDrive size={14} color="#3b82f6" /> {storageStats.storage || 'Almacenamiento'}:
           </span>
-          <span style="color: #60a5fa; font-weight: 700;">{storageStats.free_gb} GB libres</span>
+          <span style="color: #60a5fa; font-weight: 700;">{storageStats.free_gb || 0} GB libres</span>
         </div>
-        <div style="color: #64748b; font-size: 0.69rem;">
-          {storageStats.cached_tracks_count} canciones en caché ({storageStats.cache_size_mb} MB)
+        <div style="color: #64748b; font-size: 0.69rem; display: flex; align-items: center; justify-content: space-between;">
+          <span>{storageStats.cached_tracks_count || 0} pistas ({storageStats.cache_size_mb || 0} MB)</span>
+          <span style="color: #3b82f6; font-weight: 700;">Cambiar disco ⚙</span>
         </div>
-      </div>
+      </button>
     </div>
   </aside>
 

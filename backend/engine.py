@@ -18,6 +18,25 @@ os.makedirs(COVERS_DIR, exist_ok=True)
 STREAM_CACHE: Dict[str, Any] = {}
 CACHE_TTL = 3600 * 4  # 4 hours
 
+def get_storage_dir() -> str:
+    """Retrieve user configured storage directory or default CACHE_DIR."""
+    try:
+        from database import get_setting
+        custom_dir = get_setting("storage_dir", "")
+        if custom_dir and os.path.exists(custom_dir):
+            return custom_dir
+    except Exception:
+        pass
+    return CACHE_DIR
+
+def is_track_cached(video_id: str) -> bool:
+    """Check if track audio exists in active storage directory or cache."""
+    dirs = {get_storage_dir(), CACHE_DIR}
+    for d in dirs:
+        if os.path.exists(os.path.join(d, f"{video_id}.opus")) or os.path.exists(os.path.join(d, f"{video_id}.mp3")):
+            return True
+    return False
+
 # Initialize YTMusic instance
 try:
     ytm = YTMusic()
@@ -64,7 +83,7 @@ def search_music(query: str, source: str = "all") -> List[Dict[str, Any]]:
                     "duration_seconds": item.get("duration_seconds", 0),
                     "thumbnail": clean_thumbnail(item.get("thumbnails", [])),
                     "source": "youtube",
-                    "is_cached": os.path.exists(os.path.join(CACHE_DIR, f"{vid}.opus")) or os.path.exists(os.path.join(CACHE_DIR, f"{vid}.mp3"))
+                    "is_cached": is_track_cached(vid)
                 })
         except Exception as e:
             print("Error in ytm search:", e)
@@ -123,7 +142,7 @@ def get_trending_feed() -> List[Dict[str, Any]]:
                 "duration": item.get("duration", "3:30"),
                 "thumbnail": clean_thumbnail(item.get("thumbnails", [])),
                 "source": "youtube",
-                "is_cached": os.path.exists(os.path.join(CACHE_DIR, f"{vid}.opus"))
+                "is_cached": is_track_cached(vid)
             })
     except Exception as e:
         print("Charts fallback to popular search:", e)
@@ -134,13 +153,15 @@ def get_trending_feed() -> List[Dict[str, Any]]:
 
 def resolve_stream(video_id: str, source: str = "youtube") -> Dict[str, Any]:
     """Resolve direct audio stream URL with caching and local offline file detection."""
-    # 1. Check if downloaded locally
-    local_opus = os.path.join(CACHE_DIR, f"{video_id}.opus")
-    local_mp3 = os.path.join(CACHE_DIR, f"{video_id}.mp3")
-    if os.path.exists(local_opus):
-        return {"url": f"/api/local-audio/{video_id}.opus", "is_local": True, "codec": "opus"}
-    if os.path.exists(local_mp3):
-        return {"url": f"/api/local-audio/{video_id}.mp3", "is_local": True, "codec": "mp3"}
+    # 1. Check if downloaded locally in active storage directory or default cache
+    active_dir = get_storage_dir()
+    for d in {active_dir, CACHE_DIR}:
+        local_opus = os.path.join(d, f"{video_id}.opus")
+        local_mp3 = os.path.join(d, f"{video_id}.mp3")
+        if os.path.exists(local_opus):
+            return {"url": f"/api/local-audio/{video_id}.opus", "is_local": True, "codec": "opus"}
+        if os.path.exists(local_mp3):
+            return {"url": f"/api/local-audio/{video_id}.mp3", "is_local": True, "codec": "mp3"}
 
     # 2. Check memory cache
     now = time.time()
@@ -149,7 +170,7 @@ def resolve_stream(video_id: str, source: str = "youtube") -> Dict[str, Any]:
         if now < expiry:
             return {"url": cached_url, "is_local": False, "codec": codec}
 
-    # 3. Extract via yt-dlp
+    # 3. Extract via yt-dlp with mobile android/ios client to avoid datacenter bot blocks
     target_url = f"https://music.youtube.com/watch?v={video_id}"
     if source == "soundcloud" or video_id.startswith("sc_"):
         target_url = f"https://api.soundcloud.com/tracks/{video_id.replace('sc_', '')}"
@@ -159,6 +180,7 @@ def resolve_stream(video_id: str, source: str = "youtube") -> Dict[str, Any]:
         "quiet": True,
         "noplaylist": True,
         "js_runtimes": {"node": {}},
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -174,13 +196,16 @@ def resolve_stream(video_id: str, source: str = "youtube") -> Dict[str, Any]:
         return {"url": stream_url, "is_local": False, "codec": codec}
 
 def download_audio_track(video_id: str, title: str = "", artist: str = "") -> str:
-    """Download audio file locally in high quality Opus/MP3 with tags."""
-    output_template = os.path.join(CACHE_DIR, f"{video_id}.%(ext)s")
+    """Download audio file locally in high quality Opus/MP3 into active storage directory."""
+    target_dir = get_storage_dir()
+    os.makedirs(target_dir, exist_ok=True)
+    output_template = os.path.join(target_dir, f"{video_id}.%(ext)s")
     
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": output_template,
         "quiet": True,
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "opus",
@@ -192,7 +217,7 @@ def download_audio_track(video_id: str, title: str = "", artist: str = "") -> st
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([target_url])
         
-    final_file = os.path.join(CACHE_DIR, f"{video_id}.opus")
+    final_file = os.path.join(target_dir, f"{video_id}.opus")
     return final_file
 
 def get_artist_profile(artist_name: str) -> Dict[str, Any]:
@@ -257,6 +282,7 @@ def get_track_credits(video_id: str) -> Dict[str, Any]:
         "quiet": True,
         "noplaylist": True,
         "js_runtimes": {"node": {}},
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
     }
     
     credits_data = {

@@ -1,5 +1,6 @@
 import os
 import shutil
+import string
 from fastapi import FastAPI, HTTPException, Query, Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
@@ -11,11 +12,12 @@ import httpx
 from database import (
     init_db, add_favorite, remove_favorite, get_favorites, is_favorite,
     create_playlist, get_playlists, get_playlist_tracks, add_track_to_playlist,
-    delete_playlist, add_history, get_recent_history
+    delete_playlist, add_history, get_recent_history, get_setting, set_setting
 )
 from engine import (
     search_music, get_trending_feed, resolve_stream, download_audio_track,
     fetch_synced_lyrics, get_artist_profile, get_track_credits,
+    get_storage_dir, is_track_cached,
     CACHE_DIR, COVERS_DIR, BASE_DIR
 )
 
@@ -35,8 +37,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount local cache for audio files
-app.mount("/api/local-audio", StaticFiles(directory=CACHE_DIR), name="local_audio")
+# Serve cached audio files dynamically from configured storage directory or default cache
+@app.get("/api/local-audio/{filename}")
+def serve_local_audio(filename: str):
+    """Serve cached audio files from active storage dir or fallback CACHE_DIR."""
+    active_dir = get_storage_dir()
+    for d in {active_dir, CACHE_DIR}:
+        fpath = os.path.join(d, filename)
+        if os.path.exists(fpath):
+            media_type = "audio/ogg" if filename.endswith(".opus") else "audio/mpeg"
+            return FileResponse(fpath, media_type=media_type)
+    raise HTTPException(status_code=404, detail="Audio file not found")
 
 # Models
 class TrackModel(BaseModel):
@@ -52,6 +63,11 @@ class TrackModel(BaseModel):
 class PlaylistCreate(BaseModel):
     name: str
     description: Optional[str] = ""
+
+class StorageConfig(BaseModel):
+    drive: Optional[str] = None
+    path: Optional[str] = None
+    folder_name: Optional[str] = "Tono_Music"
 
 # --- Endpoints ---
 
@@ -89,13 +105,15 @@ def stream_info(video_id: str, source: str = "youtube"):
 async def audio_proxy(video_id: str, request: Request, source: str = "youtube"):
     """Proxy audio stream with HTTP Range support for seamless seeking and no CORS issues."""
     try:
-        # Check if local file exists first
-        local_opus = os.path.join(CACHE_DIR, f"{video_id}.opus")
-        local_mp3 = os.path.join(CACHE_DIR, f"{video_id}.mp3")
-        if os.path.exists(local_opus):
-            return FileResponse(local_opus, media_type="audio/ogg")
-        if os.path.exists(local_mp3):
-            return FileResponse(local_mp3, media_type="audio/mpeg")
+        # Check if local file exists first in active storage dir or cache
+        active_dir = get_storage_dir()
+        for d in {active_dir, CACHE_DIR}:
+            local_opus = os.path.join(d, f"{video_id}.opus")
+            local_mp3 = os.path.join(d, f"{video_id}.mp3")
+            if os.path.exists(local_opus):
+                return FileResponse(local_opus, media_type="audio/ogg")
+            if os.path.exists(local_mp3):
+                return FileResponse(local_mp3, media_type="audio/mpeg")
 
         # Resolve stream URL
         stream_data = resolve_stream(video_id, source=source)
@@ -237,25 +255,139 @@ def root():
         }
     }
 
+def get_system_drives() -> Dict[str, Any]:
+    """Scan and return available storage drives and current storage target."""
+    active_dir = get_storage_dir()
+    drives = []
+    
+    if os.name == "nt":
+        for letter in string.ascii_uppercase:
+            drive_root = f"{letter}:\\"
+            if os.path.exists(drive_root):
+                try:
+                    usage = shutil.disk_usage(drive_root)
+                    total_gb = round(usage.total / (1024**3), 1)
+                    free_gb = round(usage.free / (1024**3), 1)
+                    used_gb = round(usage.used / (1024**3), 1)
+                    pct = round((usage.used / usage.total) * 100, 1)
+                    
+                    label = f"Disco Local ({letter}:)"
+                    if letter == "C":
+                        label = "Disco Principal Sistema (C:)"
+                    elif letter == "D":
+                        label = "Disco Secundario / Datos (D:)"
+                        
+                    is_active = active_dir.upper().startswith(f"{letter}:")
+                    drives.append({
+                        "letter": letter,
+                        "path": drive_root,
+                        "name": label,
+                        "total_gb": total_gb,
+                        "free_gb": free_gb,
+                        "used_gb": used_gb,
+                        "percent_used": pct,
+                        "is_active": is_active,
+                        "is_recommended": letter == "D" or (letter != "C" and free_gb > 20)
+                    })
+                except Exception:
+                    pass
+    else:
+        root_path = "/"
+        try:
+            usage = shutil.disk_usage(root_path)
+            total_gb = round(usage.total / (1024**3), 1)
+            free_gb = round(usage.free / (1024**3), 1)
+            used_gb = round(usage.used / (1024**3), 1)
+            pct = round((usage.used / usage.total) * 100, 1)
+            drives.append({
+                "letter": "/",
+                "path": root_path,
+                "name": "Almacenamiento del Servidor (/)",
+                "total_gb": total_gb,
+                "free_gb": free_gb,
+                "used_gb": used_gb,
+                "percent_used": pct,
+                "is_active": True,
+                "is_recommended": True
+            })
+        except Exception:
+            pass
+
+    if not any(d["is_active"] for d in drives) and drives:
+        drives[0]["is_active"] = True
+
+    return {
+        "active_storage_dir": active_dir,
+        "drives": drives
+    }
+
+@app.get("/api/drives")
+def list_drives():
+    """List detected system storage drives and current active path."""
+    return get_system_drives()
+
+@app.post("/api/settings/storage")
+def configure_storage(config: StorageConfig):
+    """Set custom disk/directory for music downloads and offline storage."""
+    if config.path:
+        target_dir = os.path.abspath(config.path)
+    elif config.drive:
+        folder = config.folder_name or "Tono_Music"
+        target_dir = os.path.join(config.drive, folder)
+    else:
+        raise HTTPException(status_code=400, detail="Drive or path must be provided")
+
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        # Verify write permission
+        test_file = os.path.join(target_dir, ".tono_write_test")
+        with open(test_file, "w") as f:
+            f.write("ok")
+        if os.path.exists(test_file):
+            os.remove(test_file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"No se pudo acceder o crear la carpeta en ese disco: {str(e)}")
+
+    set_setting("storage_dir", target_dir)
+    return {
+        "success": True,
+        "message": f"Almacenamiento configurado en {target_dir}",
+        "storage_dir": target_dir
+    }
+
 @app.get("/api/stats")
 def storage_stats():
-    """Disk stats and cache stats (Cross-platform)."""
-    check_path = "D:\\" if os.name == "nt" and os.path.exists("D:\\") else "/"
+    """Disk stats and cache stats for the active storage directory."""
+    active_dir = get_storage_dir()
     try:
-        total, used, free = shutil.disk_usage(check_path)
+        total, used, free = shutil.disk_usage(active_dir)
     except Exception:
         total, used, free = shutil.disk_usage(".")
 
-    cached_files = [f for f in os.listdir(CACHE_DIR) if f.endswith((".opus", ".mp3", ".m4a"))]
-    cache_bytes = sum(os.path.getsize(os.path.join(CACHE_DIR, f)) for f in cached_files)
+    all_cached_files = set()
+    total_bytes = 0
+    for d in {active_dir, CACHE_DIR}:
+        if os.path.exists(d):
+            try:
+                for f in os.listdir(d):
+                    if f.endswith((".opus", ".mp3", ".m4a")):
+                        all_cached_files.add(f)
+                        total_bytes += os.path.getsize(os.path.join(d, f))
+            except Exception:
+                pass
+
+    drive_label = active_dir
+    if os.name == "nt" and len(active_dir) >= 2 and active_dir[1] == ":":
+        drive_label = f"Disco {active_dir[:2].upper()}"
 
     return {
-        "storage": check_path,
-        "total_gb": round(total / (1024**3), 2),
-        "free_gb": round(free / (1024**3), 2),
-        "cached_tracks_count": len(cached_files),
-        "cache_size_mb": round(cache_bytes / (1024**2), 2),
-        "cache_dir": CACHE_DIR
+        "storage": drive_label,
+        "active_dir": active_dir,
+        "total_gb": round(total / (1024**3), 1),
+        "free_gb": round(free / (1024**3), 1),
+        "cached_tracks_count": len(all_cached_files),
+        "cache_size_mb": round(total_bytes / (1024**2), 1),
+        "cache_dir": active_dir
     }
 
 # Mount Frontend SPA if available locally
