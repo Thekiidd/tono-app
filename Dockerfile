@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Install system dependencies: ffmpeg and nodejs (for yt-dlp JS solving)
+# Install system dependencies: ffmpeg and nodejs (for yt-dlp JS challenge solving)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     nodejs \
@@ -14,10 +14,9 @@ WORKDIR /app
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend application and frontend dist
+# Copy backend application and music storage folder
 COPY backend/ ./backend/
 COPY music_storage/ ./music_storage/
-COPY frontend/dist/ ./frontend/dist/
 
 WORKDIR /app/backend
 

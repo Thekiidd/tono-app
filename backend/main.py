@@ -223,15 +223,34 @@ def download_song(video_id: str, track: TrackModel, background_tasks: Background
     background_tasks.add_task(task)
     return {"status": "download_started", "video_id": video_id}
 
+@app.get("/")
+def root():
+    return {
+        "status": "online",
+        "service": "Tono Audio Core API",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/api/health",
+            "search": "/api/search?q=...",
+            "trending": "/api/trending",
+            "docs": "/docs"
+        }
+    }
+
 @app.get("/api/stats")
 def storage_stats():
-    """Drive D stats and cache stats."""
-    total, used, free = shutil.disk_usage("D:\\")
+    """Disk stats and cache stats (Cross-platform)."""
+    check_path = "D:\\" if os.name == "nt" and os.path.exists("D:\\") else "/"
+    try:
+        total, used, free = shutil.disk_usage(check_path)
+    except Exception:
+        total, used, free = shutil.disk_usage(".")
+
     cached_files = [f for f in os.listdir(CACHE_DIR) if f.endswith((".opus", ".mp3", ".m4a"))]
     cache_bytes = sum(os.path.getsize(os.path.join(CACHE_DIR, f)) for f in cached_files)
 
     return {
-        "drive": "D:\\",
+        "storage": check_path,
         "total_gb": round(total / (1024**3), 2),
         "free_gb": round(free / (1024**3), 2),
         "cached_tracks_count": len(cached_files),
@@ -239,9 +258,9 @@ def storage_stats():
         "cache_dir": CACHE_DIR
     }
 
-# Mount Frontend SPA at root
+# Mount Frontend SPA if available locally
 if os.path.exists(FRONTEND_DIST):
-    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+    app.mount("/app", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend_app")
 
 if __name__ == "__main__":
     import uvicorn
