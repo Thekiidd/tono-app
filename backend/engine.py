@@ -6,6 +6,7 @@ from ytmusicapi import YTMusic
 from typing import List, Dict, Any, Optional
 import asyncio
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(BASE_DIR, "music_storage", "cache")
@@ -151,8 +152,52 @@ def get_trending_feed() -> List[Dict[str, Any]]:
         
     return trending
 
+def _extract_youtube(video_id: str, source: str = "youtube") -> Optional[Dict[str, Any]]:
+    """Fast extraction using YouTube Android mobile client with strict socket timeout."""
+    target_url = f"https://www.youtube.com/watch?v={video_id}"
+    if source == "soundcloud" or video_id.startswith("sc_"):
+        target_url = f"https://api.soundcloud.com/tracks/{video_id.replace('sc_', '')}"
+
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "quiet": True,
+        "noplaylist": True,
+        "socket_timeout": 3.5,
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(target_url, download=False)
+            stream_url = info.get("url")
+            if stream_url:
+                return {"url": stream_url, "is_local": False, "codec": info.get("acodec", "opus")}
+    except Exception as e:
+        print(f"YT extract note: {e}")
+    return None
+
+def _extract_soundcloud(query: str) -> Optional[Dict[str, Any]]:
+    """Fast extraction from SoundCloud with strict timeout and DRM skipping."""
+    if not query.strip():
+        return None
+    sc_opts = {
+        "format": "bestaudio/best",
+        "quiet": True,
+        "noplaylist": True,
+        "ignoreerrors": True,
+        "socket_timeout": 3.5,
+    }
+    try:
+        with yt_dlp.YoutubeDL(sc_opts) as sc_ydl:
+            sc_res = sc_ydl.extract_info(f"scsearch2:{query}", download=False)
+            for entry in sc_res.get("entries", []) or []:
+                if entry and entry.get("url"):
+                    return {"url": entry["url"], "is_local": False, "codec": entry.get("acodec", "mp3")}
+    except Exception as e:
+        print(f"SC extract note: {e}")
+    return None
+
 def resolve_stream(video_id: str, source: str = "youtube", title: str = "", artist: str = "") -> Dict[str, Any]:
-    """Resolve direct audio stream URL with caching, mobile android extraction, and resilient SoundCloud fallback."""
+    """Resolve direct audio stream URL with lightning-fast concurrent race between YouTube and SoundCloud."""
     # 1. Check if downloaded locally in active storage directory or default cache
     active_dir = get_storage_dir()
     for d in {active_dir, CACHE_DIR}:
@@ -163,67 +208,52 @@ def resolve_stream(video_id: str, source: str = "youtube", title: str = "", arti
         if os.path.exists(local_mp3):
             return {"url": f"/api/local-audio/{video_id}.mp3", "is_local": True, "codec": "mp3"}
 
-    # 2. Check memory cache
+    # 2. Check memory cache (0ms instant return)
     now = time.time()
     if video_id in STREAM_CACHE:
         cached_url, expiry, codec = STREAM_CACHE[video_id]
         if now < expiry:
             return {"url": cached_url, "is_local": False, "codec": codec}
 
-    # 3. Extract via yt-dlp with mobile android client to avoid datacenter bot blocks
-    target_url = f"https://www.youtube.com/watch?v={video_id}"
+    # 3. Direct soundcloud track ID
     if source == "soundcloud" or video_id.startswith("sc_"):
-        target_url = f"https://api.soundcloud.com/tracks/{video_id.replace('sc_', '')}"
+        res = _extract_youtube(video_id, source="soundcloud")
+        if res:
+            STREAM_CACHE[video_id] = (res["url"], now + CACHE_TTL, res["codec"])
+            return res
+        raise RuntimeError("Could not resolve SoundCloud audio stream")
 
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "quiet": True,
-        "noplaylist": True,
-        "js_runtimes": {"node": {}},
-        "extractor_args": {"youtube": {"player_client": ["android"]}},
-    }
+    # 4. Determine search query for concurrent matching
+    query = f"{artist} {title}".strip()
+    if not query and ytm:
+        try:
+            meta = ytm.get_song(video_id)
+            v_det = meta.get("videoDetails", {})
+            query = f"{v_det.get('author', '')} {v_det.get('title', '')}".strip()
+        except Exception:
+            pass
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(target_url, download=False)
-            stream_url = info.get("url")
-            codec = info.get("acodec", "opus")
-            
-            if stream_url:
-                STREAM_CACHE[video_id] = (stream_url, now + CACHE_TTL, codec)
-                return {"url": stream_url, "is_local": False, "codec": codec}
-    except Exception as yt_err:
-        print(f"Primary YouTube stream extraction note for {video_id}: {yt_err}")
-        # Multi-CDN Resilient Fallback: Search SoundCloud by Track & Artist (skipping DRM tracks)
-        query = f"{artist} {title}".strip()
-        if not query and ytm:
-            try:
-                meta = ytm.get_song(video_id)
-                v_det = meta.get("videoDetails", {})
-                query = f"{v_det.get('author', '')} {v_det.get('title', '')}".strip()
-            except Exception:
-                pass
+    # 5. Concurrent Race: Launch both YouTube and SoundCloud in parallel
+    if query:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(_extract_youtube, video_id, "youtube"),
+                executor.submit(_extract_soundcloud, query)
+            ]
+            for f in as_completed(futures):
+                try:
+                    result = f.result()
+                    if result and result.get("url"):
+                        STREAM_CACHE[video_id] = (result["url"], now + CACHE_TTL, result["codec"])
+                        return result
+                except Exception:
+                    pass
 
-        if query:
-            try:
-                sc_opts = {
-                    "format": "bestaudio/best",
-                    "quiet": True,
-                    "noplaylist": True,
-                    "ignoreerrors": True,
-                }
-                with yt_dlp.YoutubeDL(sc_opts) as sc_ydl:
-                    sc_res = sc_ydl.extract_info(f"scsearch5:{query}", download=False)
-                    for entry in sc_res.get("entries", []) or []:
-                        if entry and entry.get("url"):
-                            sc_url = entry["url"]
-                            codec = entry.get("acodec", "mp3")
-                            STREAM_CACHE[video_id] = (sc_url, now + CACHE_TTL, codec)
-                            return {"url": sc_url, "is_local": False, "codec": codec}
-            except Exception as sc_err:
-                print(f"SoundCloud fallback stream note: {sc_err}")
-
-        raise RuntimeError(f"Could not resolve audio stream URL: {yt_err}")
+    # Fallback to direct YouTube if query was empty or race finished without hit
+    res = _extract_youtube(video_id, "youtube")
+    if res:
+        STREAM_CACHE[video_id] = (res["url"], now + CACHE_TTL, res["codec"])
+        return res
 
     raise RuntimeError("Could not resolve audio stream URL")
 

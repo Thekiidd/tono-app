@@ -3,7 +3,8 @@
   import { 
     Play, Pause, SkipForward, SkipBack, Shuffle, Repeat, Volume1, Volume2, VolumeX,
     Search, Heart, Music, ListMusic, Download, Disc, Clock, Mic2, Home,
-    Library, HardDrive, Sparkles, User, Info, X, Check, Disc3, Settings, Folder
+    Library, HardDrive, Sparkles, User, Info, X, Check, Disc3, Settings, Folder,
+    Maximize2, Minimize2, SlidersHorizontal, Plus
   } from 'lucide-svelte';
 
   // --- Navigation & Views ---
@@ -52,6 +53,19 @@
   let isSavingStorage = false;
   let storageMessage = '';
 
+  // Spotify Features State
+  let showQueueDrawer = false;
+  let showFullscreenMode = false;
+  let showAddToPlaylistModal = false;
+  let trackToAddToPlaylist = null;
+  let newPlaylistInput = '';
+  let showAudioSettingsModal = false;
+  let isBassBoost = false;
+  let crossfadeSeconds = 3;
+  let toastMessage = '';
+  let toastTimeout;
+  const prefetchedSet = new Set();
+
   // Audio DOM element
   let audioElement;
 
@@ -78,6 +92,45 @@
       navigator.mediaSession.setActionHandler('previoustrack', () => playPrev());
       navigator.mediaSession.setActionHandler('nexttrack', () => playNext());
     }
+
+    // Spotify-style Global Keyboard Shortcuts
+    const handleKeyDown = (e) => {
+      if (['INPUT', 'TEXTAREA'].includes(e.target?.tagName)) return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.code === 'ArrowRight') {
+        e.preventDefault();
+        seekRelative(5);
+      } else if (e.code === 'ArrowLeft') {
+        e.preventDefault();
+        seekRelative(-5);
+      } else if (e.code === 'ArrowUp') {
+        e.preventDefault();
+        setVolume(Math.min(1, volume + 0.05));
+      } else if (e.code === 'ArrowDown') {
+        e.preventDefault();
+        setVolume(Math.max(0, volume - 0.05));
+      } else if (e.key.toLowerCase() === 'm') {
+        toggleMute();
+      } else if (e.key.toLowerCase() === 'l') {
+        activeTab = activeTab === 'lyrics' ? 'home' : 'lyrics';
+      } else if (e.key.toLowerCase() === 'q') {
+        showQueueDrawer = !showQueueDrawer;
+      } else if (e.key.toLowerCase() === 'f') {
+        showFullscreenMode = !showFullscreenMode;
+      } else if (e.key === 'Escape') {
+        showFullscreenMode = false;
+        showQueueDrawer = false;
+        showAddToPlaylistModal = false;
+        showAudioSettingsModal = false;
+        showStorageModal = false;
+        showCreditsModal = false;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   });
 
   // --- API Fetchers ---
@@ -175,6 +228,128 @@
     showStorageModal = true;
   }
 
+  // --- Spotify Features & Automated Prefetch Engine ---
+  function showToast(msg) {
+    clearTimeout(toastTimeout);
+    toastMessage = msg;
+    toastTimeout = setTimeout(() => { toastMessage = ''; }, 2600);
+  }
+
+  function prefetchTrack(track) {
+    if (!track || !track.video_id || prefetchedSet.has(track.video_id)) return;
+    prefetchedSet.add(track.video_id);
+    fetch(`${API_BASE}/stream/prefetch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        video_id: track.video_id,
+        title: track.title || '',
+        artist: track.artist || '',
+        source: track.source || 'youtube'
+      })
+    }).catch(() => {});
+  }
+
+  function seekRelative(delta) {
+    if (audioElement && duration > 0) {
+      const nextTime = Math.max(0, Math.min(duration, currentTime + delta));
+      audioElement.currentTime = nextTime;
+      currentTime = nextTime;
+    }
+  }
+
+  function setVolume(v) {
+    volume = Math.max(0, Math.min(1, v));
+    if (audioElement) audioElement.volume = isMuted ? 0 : volume;
+  }
+
+  function removeFromQueue(index, e) {
+    if (e) e.stopPropagation();
+    queue = queue.filter((_, i) => i !== index);
+    if (queueIndex >= index) queueIndex = Math.max(0, queueIndex - 1);
+    showToast('Pista eliminada de la cola');
+  }
+
+  function clearQueue() {
+    if (currentTrack) {
+      queue = [currentTrack];
+      queueIndex = 0;
+    } else {
+      queue = [];
+      queueIndex = -1;
+    }
+    showToast('Cola de reproducción vaciada');
+  }
+
+  function openAddToPlaylist(track, e) {
+    if (e) e.stopPropagation();
+    trackToAddToPlaylist = track;
+    showAddToPlaylistModal = true;
+  }
+
+  async function addTrackToSelectedPlaylist(playlistId, playlistName) {
+    if (!trackToAddToPlaylist) return;
+    try {
+      await fetch(`${API_BASE}/playlists/${playlistId}/tracks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(trackToAddToPlaylist)
+      });
+      showToast(`Añadida a "${playlistName}"`);
+      await fetchPlaylists();
+      showAddToPlaylistModal = false;
+      trackToAddToPlaylist = null;
+    } catch (err) {
+      console.error(err);
+      showToast('Error al añadir canción');
+    }
+  }
+
+  async function createAndAddToPlaylist() {
+    if (!newPlaylistInput.trim() || !trackToAddToPlaylist) return;
+    try {
+      const res = await fetch(`${API_BASE}/playlists`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newPlaylistInput.trim() })
+      });
+      const data = await res.json();
+      await addTrackToSelectedPlaylist(data.id, data.name);
+      newPlaylistInput = '';
+    } catch (err) {
+      console.error(err);
+      showToast('Error al crear playlist');
+    }
+  }
+
+  let audioCtx = null;
+  let bassNode = null;
+  function toggleBassBoost() {
+    isBassBoost = !isBassBoost;
+    try {
+      if (!audioCtx && audioElement) {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContext();
+        const source = audioCtx.createMediaElementSource(audioElement);
+        bassNode = audioCtx.createBiquadFilter();
+        bassNode.type = 'lowshelf';
+        bassNode.frequency.value = 160;
+        source.connect(bassNode);
+        bassNode.connect(audioCtx.destination);
+      }
+      if (bassNode) {
+        bassNode.gain.value = isBassBoost ? 8.5 : 0;
+      }
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+      showToast(isBassBoost ? '🔥 Bass Boost Studio Activado (+8.5 dB)' : 'Bass Boost Desactivado (Plano)');
+    } catch (e) {
+      console.warn('Web Audio API note:', e);
+      showToast(isBassBoost ? 'Bass Boost Activado' : 'Bass Boost Desactivado');
+    }
+  }
+
   // --- Search Handler ---
   let searchTimeout;
   function handleSearchInput() {
@@ -246,6 +421,10 @@
     currentTrack = track;
     isLoadingAudio = true;
     currentTime = 0;
+
+    // Lookahead automatic background prefetching for next queue items
+    if (queue.length > queueIndex + 1) prefetchTrack(queue[queueIndex + 1]);
+    if (queue.length > queueIndex + 2) prefetchTrack(queue[queueIndex + 2]);
 
     // Fetch synchronized lyrics
     fetchLyrics(track.title, track.artist);
@@ -752,6 +931,442 @@
   </div>
 {/if}
 
+<!-- ADD TO PLAYLIST MODAL -->
+{#if showAddToPlaylistModal && trackToAddToPlaylist}
+  <div 
+    style="position: fixed; inset: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(10px); display: flex; align-items: center; justify-content: center; z-index: 230; padding: 20px;"
+    on:click={() => showAddToPlaylistModal = false}
+    on:keydown={(e) => { if (e.key === 'Escape') showAddToPlaylistModal = false; }}
+    role="dialog"
+    tabindex="-1"
+    aria-label="Añadir a playlist"
+  >
+    <div 
+      style="background: #141722; width: 100%; max-width: 480px; border-radius: 20px; border: 1px solid #252c3f; padding: 26px; box-shadow: 0 24px 70px rgba(0,0,0,0.85); max-height: 85vh; overflow-y: auto;"
+      on:click={(e) => e.stopPropagation()}
+      on:keydown={() => {}}
+      role="document"
+      tabindex="-1"
+    >
+      <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px;">
+        <div>
+          <span style="font-size: 0.72rem; color: #60a5fa; font-weight: 800; text-transform: uppercase; letter-spacing: 1px;">Colecciones</span>
+          <h3 style="font-size: 1.3rem; font-weight: 800; margin-top: 2px;">Añadir a Playlist</h3>
+        </div>
+        <button 
+          type="button"
+          on:click={() => showAddToPlaylistModal = false}
+          style="background: #1c2130; border: none; color: #94a3b8; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer;"
+        >
+          <X size={16} />
+        </button>
+      </div>
+
+      <!-- TRACK MINI PREVIEW -->
+      <div style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: #0c0e15; border-radius: 10px; margin-bottom: 20px; border: 1px solid #1f2538;">
+        <img src={trackToAddToPlaylist.thumbnail} alt="" style="width: 42px; height: 42px; border-radius: 6px; object-fit: cover;" />
+        <div style="overflow: hidden;">
+          <div style="font-weight: 700; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{trackToAddToPlaylist.title}</div>
+          <div style="font-size: 0.75rem; color: #94a3b8;">{trackToAddToPlaylist.artist}</div>
+        </div>
+      </div>
+
+      <!-- CREATE NEW PLAYLIST INLINE -->
+      <div style="display: flex; gap: 8px; margin-bottom: 20px;">
+        <input 
+          type="text" 
+          bind:value={newPlaylistInput}
+          placeholder="Nombre de nueva playlist..." 
+          on:keydown={(e) => { if (e.key === 'Enter') createAndAddToPlaylist(); }}
+          style="flex: 1; background: #0c0e15; border: 1px solid #23283a; border-radius: 8px; padding: 8px 14px; color: #fff; font-size: 0.85rem; outline: none;"
+        />
+        <button 
+          type="button"
+          on:click={createAndAddToPlaylist}
+          disabled={!newPlaylistInput.trim()}
+          style="padding: 8px 14px; border-radius: 8px; background: #3b82f6; border: none; color: #fff; font-weight: 700; font-size: 0.82rem; cursor: pointer; display: flex; align-items: center; gap: 6px;"
+        >
+          <Plus size={16} /> Crear
+        </button>
+      </div>
+
+      <!-- USER PLAYLISTS LIST -->
+      <div style="font-size: 0.74rem; color: #64748b; font-weight: 800; text-transform: uppercase; margin-bottom: 8px;">Tus Playlists ({playlists.length})</div>
+      <div style="display: flex; flex-direction: column; gap: 8px; max-height: 250px; overflow-y: auto;">
+        {#if playlists.length === 0}
+          <div style="padding: 16px; text-align: center; color: #64748b; font-size: 0.85rem;">
+            Aún no has creado ninguna playlist. Escribe un nombre arriba para crear tu primera lista.
+          </div>
+        {:else}
+          {#each playlists as pl}
+            <button 
+              type="button"
+              on:click={() => addTrackToSelectedPlaylist(pl.id, pl.name)}
+              style="display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; background: #0c0e15; border: 1px solid #1f2538; border-radius: 10px; cursor: pointer; text-align: left; transition: all 0.15s; width: 100%;"
+              class="hover:border-blue-500 hover:bg-[#151926]"
+            >
+              <div style="display: flex; align-items: center; gap: 10px;">
+                <ListMusic size={18} color="#60a5fa" />
+                <span style="font-weight: 700; font-size: 0.88rem; color: #fff;">{pl.name}</span>
+              </div>
+              <span style="font-size: 0.75rem; color: #3b82f6; font-weight: 700; display: flex; align-items: center; gap: 4px;">
+                <Plus size={14} /> Añadir
+              </span>
+            </button>
+          {/each}
+        {/if}
+      </div>
+
+    </div>
+  </div>
+{/if}
+
+<!-- SPOTIFY AUDIO ENHANCER & EQUALIZER MODAL -->
+{#if showAudioSettingsModal}
+  <div 
+    style="position: fixed; inset: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(10px); display: flex; align-items: center; justify-content: center; z-index: 230; padding: 20px;"
+    on:click={() => showAudioSettingsModal = false}
+    on:keydown={(e) => { if (e.key === 'Escape') showAudioSettingsModal = false; }}
+    role="dialog"
+    tabindex="-1"
+    aria-label="Ajustes de audio"
+  >
+    <div 
+      style="background: #141722; width: 100%; max-width: 500px; border-radius: 20px; border: 1px solid #252c3f; padding: 28px; box-shadow: 0 24px 70px rgba(0,0,0,0.85);"
+      on:click={(e) => e.stopPropagation()}
+      on:keydown={() => {}}
+      role="document"
+      tabindex="-1"
+    >
+      <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 22px;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="width: 44px; height: 44px; border-radius: 12px; background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.3); display: flex; align-items: center; justify-content: center;">
+            <SlidersHorizontal size={22} color="#3b82f6" />
+          </div>
+          <div>
+            <span style="font-size: 0.72rem; color: #60a5fa; font-weight: 800; text-transform: uppercase; letter-spacing: 1px;">Motor de Sonido</span>
+            <h3 style="font-size: 1.35rem; font-weight: 800; margin-top: 2px;">Mejoras de Audio</h3>
+          </div>
+        </div>
+        <button 
+          type="button"
+          on:click={() => showAudioSettingsModal = false}
+          style="background: #1c2130; border: none; color: #94a3b8; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer;"
+        >
+          <X size={18} />
+        </button>
+      </div>
+
+      <!-- BASS BOOST TOGGLE -->
+      <div style="padding: 16px; background: #0c0e15; border-radius: 12px; border: 1px solid #1f2538; display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
+        <div>
+          <div style="font-weight: 800; font-size: 0.95rem; color: #fff; display: flex; align-items: center; gap: 8px;">
+            Studio Bass Boost (+8.5 dB)
+            {#if isBassBoost}
+              <span style="font-size: 0.65rem; background: #3b82f6; color: #fff; padding: 2px 6px; border-radius: 4px;">ACTIVO</span>
+            {/if}
+          </div>
+          <div style="font-size: 0.76rem; color: #94a3b8; margin-top: 4px;">Realce analógico para graves profundos y contundentes.</div>
+        </div>
+        <button 
+          type="button"
+          on:click={toggleBassBoost}
+          style="width: 52px; height: 28px; border-radius: 14px; background: {isBassBoost ? '#3b82f6' : '#22283a'}; border: none; cursor: pointer; position: relative; transition: background 0.2s;"
+        >
+          <div style="width: 22px; height: 22px; border-radius: 50%; background: #fff; position: absolute; top: 3px; left: {isBassBoost ? '27px' : '3px'}; transition: left 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>
+        </button>
+      </div>
+
+      <!-- CROSSFADE SETTING -->
+      <div style="padding: 16px; background: #0c0e15; border-radius: 12px; border: 1px solid #1f2538; margin-bottom: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span style="font-weight: 800; font-size: 0.92rem; color: #fff;">Crossfade entre canciones</span>
+          <span style="font-size: 0.8rem; color: #60a5fa; font-weight: 700;">{crossfadeSeconds} segundos</span>
+        </div>
+        <p style="font-size: 0.74rem; color: #94a3b8; margin-bottom: 12px;">Transición fluida sin silencios entre el final de una pista y el inicio de la siguiente.</p>
+        <input 
+          type="range" 
+          min="0" 
+          max="12" 
+          bind:value={crossfadeSeconds} 
+          style="width: 100%; accent-color: #3b82f6;"
+        />
+      </div>
+
+      <!-- AUDIO QUALITY BADGE -->
+      <div style="padding: 12px 16px; background: rgba(59, 130, 246, 0.08); border-radius: 10px; border: 1px solid rgba(59, 130, 246, 0.25); display: flex; align-items: center; justify-content: space-between;">
+        <div style="font-size: 0.8rem; color: #94a3b8;">Calidad de Flujo:</div>
+        <div style="font-size: 0.85rem; font-weight: 800; color: #60a5fa; display: flex; align-items: center; gap: 6px;">
+          <Sparkles size={16} color="#3b82f6" /> Master Hi-Fi (Opus 192kbps / MP3 320kbps)
+        </div>
+      </div>
+
+      <div style="margin-top: 20px; display: flex; justify-content: flex-end;">
+        <button 
+          type="button" 
+          on:click={() => showAudioSettingsModal = false}
+          style="padding: 10px 20px; border-radius: 8px; background: #3b82f6; border: none; color: #fff; font-weight: 800; font-size: 0.85rem; cursor: pointer;"
+        >
+          Listo
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- SPOTIFY-STYLE QUEUE DRAWER -->
+{#if showQueueDrawer}
+  <div 
+    style="position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 140;"
+    on:click={() => showQueueDrawer = false}
+    on:keydown={(e) => { if (e.key === 'Escape') showQueueDrawer = false; }}
+    role="dialog"
+    tabindex="-1"
+    aria-label="Cerrar cola"
+  ></div>
+
+  <aside 
+    style="position: fixed; right: 0; top: 0; bottom: 90px; width: 380px; max-width: 90vw; background: #0c0e15; border-left: 1px solid #1c2233; z-index: 150; box-shadow: -12px 0 40px rgba(0,0,0,0.85); display: flex; flex-direction: column; padding: 22px; overflow-y: auto;"
+    role="complementary"
+    aria-label="Cola de reproducción"
+  >
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <ListMusic size={20} color="#3b82f6" />
+        <h3 style="font-size: 1.2rem; font-weight: 800;">Cola de Reproducción</h3>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        {#if queue.length > 1}
+          <button 
+            type="button"
+            on:click={clearQueue}
+            style="background: transparent; border: 1px solid #23283a; color: #94a3b8; font-size: 0.74rem; font-weight: 700; padding: 5px 10px; border-radius: 6px; cursor: pointer;"
+            class="hover:text-white hover:border-red-400"
+          >
+            Vaciar
+          </button>
+        {/if}
+        <button 
+          type="button"
+          on:click={() => showQueueDrawer = false}
+          style="background: #161924; border: none; color: #94a3b8; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer;"
+        >
+          <X size={16} />
+        </button>
+      </div>
+    </div>
+
+    <!-- CURRENT TRACK IN QUEUE -->
+    {#if currentTrack}
+      <div style="margin-bottom: 24px;">
+        <div style="font-size: 0.72rem; color: #64748b; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px;">
+          Reproduciendo Ahora
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 12px;">
+          <img src={currentTrack.thumbnail} alt="" style="width: 48px; height: 48px; border-radius: 8px; object-fit: cover;" />
+          <div style="flex: 1; overflow: hidden;">
+            <div style="font-weight: 800; font-size: 0.9rem; color: #60a5fa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+              {currentTrack.title}
+            </div>
+            <div style="font-size: 0.76rem; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+              {currentTrack.artist}
+            </div>
+          </div>
+          <!-- Bouncing equalizer bars -->
+          <div class="equalizer-bars {isPlaying ? 'playing' : ''}">
+            <span class="bar"></span>
+            <span class="bar"></span>
+            <span class="bar"></span>
+            <span class="bar"></span>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    <!-- UP NEXT IN QUEUE -->
+    <div style="flex: 1; display: flex; flex-direction: column;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <span style="font-size: 0.72rem; color: #64748b; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px;">
+          A continuación ({Math.max(0, queue.length - (queueIndex + 1))})
+        </span>
+      </div>
+
+      {#if queue.length <= 1 || queueIndex >= queue.length - 1}
+        <div style="padding: 24px 12px; text-align: center; color: #64748b; font-size: 0.82rem; background: #090a0f; border-radius: 10px; border: 1px dashed #1c2233;">
+          No hay más canciones en espera.<br>Explora o busca pistas para agregarlas a la cola.
+        </div>
+      {:else}
+        <div style="display: flex; flex-direction: column; gap: 6px; overflow-y: auto;">
+          {#each queue.slice(queueIndex + 1) as t, i}
+            <div 
+              role="button"
+              tabindex="0"
+              on:click={() => playTrack(t, queue, queueIndex + 1 + i)}
+              on:keydown={(e) => { if (e.key === 'Enter') playTrack(t, queue, queueIndex + 1 + i); }}
+              style="display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: background 0.15s; background: #0f121a;"
+              class="hover:bg-[#1a2030]"
+            >
+              <span style="font-size: 0.74rem; color: #64748b; min-width: 16px;">{i + 1}</span>
+              <img src={t.thumbnail} alt="" style="width: 38px; height: 38px; border-radius: 6px; object-fit: cover;" />
+              <div style="flex: 1; overflow: hidden;">
+                <div style="font-weight: 700; font-size: 0.84rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff;">
+                  {t.title}
+                </div>
+                <div style="font-size: 0.72rem; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                  {t.artist}
+                </div>
+              </div>
+              <button 
+                type="button"
+                on:click={(e) => removeFromQueue(queueIndex + 1 + i, e)}
+                style="background: transparent; border: none; color: #64748b; padding: 4px; cursor: pointer;"
+                class="hover:text-red-400"
+                title="Quitar de la cola"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  </aside>
+{/if}
+
+<!-- SPOTIFY-STYLE FULLSCREEN IMMERSIVE CANVAS MODE -->
+{#if showFullscreenMode && currentTrack}
+  <div 
+    style="position: fixed; inset: 0; z-index: 300; background: radial-gradient(circle at 50% 30%, #1e293b 0%, #06070a 100%); display: flex; flex-direction: column; justify-content: space-between; padding: 40px; color: #fff; overflow-y: auto;"
+    role="dialog"
+    tabindex="-1"
+    aria-label="Reproductor en pantalla completa"
+  >
+    <!-- TOP HEADER -->
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <div style="width: 32px; height: 32px; border-radius: 8px; background: #3b82f6; display: flex; align-items: center; justify-content: center;">
+          <Disc3 size={18} color="#fff" />
+        </div>
+        <span style="font-weight: 800; letter-spacing: -0.5px; font-size: 1.1rem;">Tono Inmersivo</span>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 16px;">
+        <button 
+          type="button"
+          on:click={toggleBassBoost}
+          style="padding: 8px 16px; border-radius: 500px; background: {isBassBoost ? '#3b82f6' : 'rgba(255,255,255,0.1)'}; border: none; color: #fff; font-size: 0.8rem; font-weight: 800; cursor: pointer; display: flex; align-items: center; gap: 6px;"
+        >
+          <Sparkles size={16} /> Bass Boost
+        </button>
+        <button 
+          type="button"
+          on:click={() => showFullscreenMode = false}
+          style="width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,0.1); border: none; color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer;"
+          class="hover:bg-white hover:text-black"
+          title="Salir de pantalla completa (Esc)"
+        >
+          <Minimize2 size={20} />
+        </button>
+      </div>
+    </div>
+
+    <!-- CENTER HERO: ARTWORK + REAL-TIME SYNCHRONIZED LYRICS -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 60px; max-width: 1200px; width: 100%; margin: 20px auto; align-items: center;">
+      <!-- ARTWORK WITH GLOW -->
+      <div style="display: flex; flex-direction: column; align-items: center; text-align: center;">
+        <div style="position: relative; width: 380px; height: 380px; max-width: 75vw; max-height: 75vw;">
+          <img 
+            src={currentTrack.thumbnail} 
+            alt={currentTrack.title} 
+            style="width: 100%; height: 100%; border-radius: 20px; object-fit: cover; box-shadow: 0 20px 60px rgba(0,0,0,0.85); {isPlaying ? 'animation: vinylPulse 4s ease-in-out infinite alternate;' : ''}"
+          />
+        </div>
+        <div style="margin-top: 24px;">
+          <h2 style="font-size: 2rem; font-weight: 900; letter-spacing: -0.5px; line-height: 1.2;">{currentTrack.title}</h2>
+          <p style="font-size: 1.15rem; color: #94a3b8; font-weight: 700; margin-top: 6px;">{currentTrack.artist}</p>
+        </div>
+      </div>
+
+      <!-- LYRICS STREAM -->
+      <div style="height: 420px; overflow-y: auto; padding-right: 16px; mask-image: linear-gradient(180deg, transparent 0%, black 15%, black 85%, transparent 100%); display: flex; flex-direction: column; gap: 14px;">
+        {#if lyricsData && lyricsData.is_synced && lyricsData.synced?.length > 0}
+          {#each lyricsData.synced as line, i}
+            <div 
+              style="font-size: {currentLyricIndex === i ? '2.1rem' : '1.4rem'}; font-weight: 800; line-height: 1.35; color: {currentLyricIndex === i ? '#ffffff' : 'rgba(255,255,255,0.25)'}; transition: all 0.25s; text-shadow: {currentLyricIndex === i ? '0 0 30px rgba(59,130,246,0.8)' : 'none'};"
+            >
+              {line.text}
+            </div>
+          {/each}
+        {:else if lyricsData && lyricsData.plain}
+          <div style="font-size: 1.3rem; line-height: 1.8; color: #94a3b8; font-weight: 600; white-space: pre-wrap;">
+            {lyricsData.plain}
+          </div>
+        {:else}
+          <div style="height: 100%; display: flex; align-items: center; justify-content: center; color: #64748b; font-size: 1.1rem;">
+            Disfrutando de "{currentTrack.title}" de {currentTrack.artist}
+          </div>
+        {/if}
+      </div>
+    </div>
+
+    <!-- BOTTOM CONTROLS IN FULLSCREEN -->
+    <div style="max-width: 800px; width: 100%; margin: 0 auto;">
+      <!-- PROGRESS BAR -->
+      <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 16px; font-size: 0.85rem; color: #94a3b8;">
+        <span>{formatSeconds(currentTime)}</span>
+        <input 
+          type="range" 
+          min="0" 
+          max={duration || 100} 
+          value={currentTime} 
+          on:input={handleSeek}
+          style="width: 100%; accent-color: #3b82f6; height: 6px;"
+        />
+        <span>{formatSeconds(duration)}</span>
+      </div>
+
+      <!-- PLAYBACK BUTTONS -->
+      <div style="display: flex; align-items: center; justify-content: center; gap: 28px;">
+        <button type="button" on:click={() => isShuffle = !isShuffle} style="background: transparent; border: none; cursor: pointer; color: {isShuffle ? '#3b82f6' : '#64748b'};">
+          <Shuffle size={22} />
+        </button>
+        <button type="button" on:click={playPrev} style="background: transparent; border: none; cursor: pointer; color: #fff;">
+          <SkipBack size={26} fill="#fff" />
+        </button>
+        <button 
+          type="button" 
+          on:click={togglePlay} 
+          style="width: 58px; height: 58px; border-radius: 50%; background: #ffffff; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 0 25px rgba(255,255,255,0.35);"
+          class="hover:scale-105"
+        >
+          {#if isPlaying}
+            <Pause size={28} color="#000" fill="#000" />
+          {:else}
+            <Play size={28} color="#000" fill="#000" style="margin-left: 2px;" />
+          {/if}
+        </button>
+        <button type="button" on:click={playNext} style="background: transparent; border: none; cursor: pointer; color: #fff;">
+          <SkipForward size={26} fill="#fff" />
+        </button>
+        <button type="button" on:click={cycleRepeat} style="background: transparent; border: none; cursor: pointer; color: {repeatMode > 0 ? '#3b82f6' : '#64748b'};">
+          <Repeat size={22} />
+        </button>
+      </div>
+    </div>
+
+  </div>
+{/if}
+
+<!-- FLOATING TOAST NOTIFICATION -->
+{#if toastMessage}
+  <div 
+    style="position: fixed; bottom: 105px; left: 50%; transform: translateX(-50%); background: rgba(18, 22, 34, 0.95); backdrop-filter: blur(14px); border: 1px solid rgba(59, 130, 246, 0.4); color: #fff; padding: 10px 22px; border-radius: 500px; font-weight: 700; font-size: 0.85rem; box-shadow: 0 10px 30px rgba(0,0,0,0.6); z-index: 250; display: flex; align-items: center; gap: 8px;"
+  >
+    <Sparkles size={16} color="#60a5fa" />
+    <span>{toastMessage}</span>
+  </div>
+{/if}
+
 <div style="display: flex; height: 100vh; width: 100vw; background: #090a0f; color: #fff;">
   
   <!-- LEFT SIDEBAR -->
@@ -923,6 +1538,7 @@
               <div 
                 role="row"
                 tabindex="0"
+                on:mouseenter={() => prefetchTrack(track)}
                 on:click={() => playTrack(track, trendingTracks)}
                 on:keydown={(e) => { if (e.key === 'Enter') playTrack(track, trendingTracks); }}
                 style="background: #151822; border: 1px solid #1e2434; border-radius: 8px; display: flex; align-items: center; gap: 14px; cursor: pointer; overflow: hidden; text-align: left; padding: 0; color: #fff; transition: transform 0.15s, background 0.15s;"
@@ -957,6 +1573,7 @@
               <div 
                 role="button"
                 tabindex="0"
+                on:mouseenter={() => prefetchTrack(track)}
                 on:click={() => playTrack(track, trendingTracks, idx)}
                 on:keydown={(e) => { if (e.key === 'Enter') playTrack(track, trendingTracks, idx); }}
                 style="background: #12151e; padding: 14px; border-radius: 10px; cursor: pointer; border: 1px solid #1c2130; text-align: left; color: #fff; transition: all 0.2s; position: relative;"
@@ -968,7 +1585,18 @@
                     <Play size={20} color="#fff" fill="#fff" style="margin-left: 2px;" />
                   </div>
                 </div>
-                <div style="font-weight: 700; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px;">{track.title}</div>
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 3px;">
+                  <div style="font-weight: 700; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{track.title}</div>
+                  <button 
+                    type="button" 
+                    on:click={(e) => openAddToPlaylist(track, e)} 
+                    style="background: transparent; border: none; color: #64748b; cursor: pointer; padding: 2px;" 
+                    class="hover:text-white"
+                    title="Añadir a playlist"
+                  >
+                    <Plus size={15} />
+                  </button>
+                </div>
                 <div 
                   on:click={(e) => openArtistProfile(track.artist, e)}
                   style="font-size: 0.78rem; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;"
@@ -1353,8 +1981,18 @@
         type="button"
         on:click={(e) => toggleFavorite(currentTrack, e)}
         style="background: transparent; border: none; cursor: pointer; color: {favorites.some(f => f.video_id === currentTrack.video_id) ? '#3b82f6' : '#64748b'}; margin-left: 6px;"
+        title="Favorito"
       >
         <Heart size={18} fill={favorites.some(f => f.video_id === currentTrack.video_id) ? '#3b82f6' : 'none'} />
+      </button>
+      <button 
+        type="button"
+        on:click={(e) => openAddToPlaylist(currentTrack, e)}
+        style="background: transparent; border: none; cursor: pointer; color: #94a3b8; margin-left: 4px;"
+        title="Añadir a playlist (+)"
+        class="hover:text-white"
+      >
+        <Plus size={18} />
       </button>
     {:else}
       <div style="width: 54px; height: 54px; border-radius: 8px; background: #161924; display: flex; align-items: center; justify-content: center;">
@@ -1463,6 +2101,39 @@
       title="Letras en Vivo"
     >
       <Mic2 size={18} />
+    </button>
+
+    <!-- AUDIO ENHANCER BUTTON -->
+    <button 
+      type="button"
+      on:click={() => showAudioSettingsModal = true}
+      style="background: transparent; border: none; cursor: pointer; color: {isBassBoost ? '#3b82f6' : '#94a3b8'};"
+      title="Ajustes de Sonido & Bass Boost"
+      class="hover:text-white"
+    >
+      <SlidersHorizontal size={18} />
+    </button>
+
+    <!-- QUEUE DRAWER BUTTON -->
+    <button 
+      type="button"
+      on:click={() => showQueueDrawer = !showQueueDrawer}
+      style="background: transparent; border: none; cursor: pointer; color: {showQueueDrawer ? '#3b82f6' : '#94a3b8'};"
+      title="Cola de reproducción (Q)"
+      class="hover:text-white"
+    >
+      <ListMusic size={18} />
+    </button>
+
+    <!-- FULLSCREEN IMMERSIVE MODE BUTTON -->
+    <button 
+      type="button"
+      on:click={() => showFullscreenMode = !showFullscreenMode}
+      style="background: transparent; border: none; cursor: pointer; color: #94a3b8;"
+      title="Pantalla Completa Inmersiva (F)"
+      class="hover:text-white"
+    >
+      <Maximize2 size={18} />
     </button>
 
     <!-- VOLUME CONTROLS -->

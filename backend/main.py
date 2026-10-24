@@ -17,7 +17,7 @@ from database import (
 from engine import (
     search_music, get_trending_feed, resolve_stream, download_audio_track,
     fetch_synced_lyrics, get_artist_profile, get_track_credits,
-    get_storage_dir, is_track_cached,
+    get_storage_dir, is_track_cached, STREAM_CACHE,
     CACHE_DIR, COVERS_DIR, BASE_DIR
 )
 
@@ -69,28 +69,58 @@ class StorageConfig(BaseModel):
     path: Optional[str] = None
     folder_name: Optional[str] = "Tono_Music"
 
+class PrefetchRequest(BaseModel):
+    video_id: str
+    title: Optional[str] = ""
+    artist: Optional[str] = ""
+    source: Optional[str] = "youtube"
+
+def prefetch_feed_streams(tracks: List[Dict[str, Any]], limit: int = 8):
+    """Background worker to pre-resolve direct stream URLs for top tracks."""
+    for t in tracks[:limit]:
+        vid = t.get("video_id")
+        if vid and vid not in STREAM_CACHE:
+            try:
+                resolve_stream(vid, source=t.get("source", "youtube"), title=t.get("title", ""), artist=t.get("artist", ""))
+            except Exception:
+                pass
+
 # --- Endpoints ---
 
 @app.get("/api/health")
 def health():
-    return {"status": "online", "service": "Tono Audio Core", "version": "1.0.3"}
+    return {"status": "online", "service": "Tono Audio Core", "version": "1.0.4"}
 
 @app.get("/api/search")
-def search(q: str = Query(..., min_length=1), source: str = "all"):
+def search(q: str = Query(..., min_length=1), source: str = "all", background_tasks: BackgroundTasks = BackgroundTasks()):
     """Search YouTube Music, SoundCloud and local tracks."""
     results = search_music(q, source=source)
-    # Check favorite status
     for item in results:
         item["is_favorite"] = is_favorite(item["video_id"])
+    if len(results) > 0:
+        background_tasks.add_task(prefetch_feed_streams, results, 4)
     return {"query": q, "count": len(results), "results": results}
 
 @app.get("/api/trending")
-def trending():
-    """Get home trending tracks."""
+def trending(background_tasks: BackgroundTasks):
+    """Get home trending tracks and auto-prefetch top tracks in background."""
     feed = get_trending_feed()
     for item in feed:
         item["is_favorite"] = is_favorite(item["video_id"])
+    background_tasks.add_task(prefetch_feed_streams, feed, 8)
     return {"results": feed}
+
+@app.post("/api/stream/prefetch")
+def prefetch_single_track(req: PrefetchRequest, background_tasks: BackgroundTasks):
+    """Silently pre-resolve a track in the background for zero-latency future playback."""
+    if req.video_id not in STREAM_CACHE:
+        def task():
+            try:
+                resolve_stream(req.video_id, source=req.source or "youtube", title=req.title or "", artist=req.artist or "")
+            except Exception:
+                pass
+        background_tasks.add_task(task)
+    return {"status": "prefetching", "video_id": req.video_id}
 
 @app.get("/api/stream/{video_id}")
 def stream_info(video_id: str, source: str = "youtube", title: Optional[str] = "", artist: Optional[str] = ""):
