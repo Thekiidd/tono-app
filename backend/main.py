@@ -555,14 +555,18 @@ def download_song(video_id: str, track: TrackModel, background_tasks: Background
 
 @app.get("/")
 def root():
+    index_file = os.path.join(FRONTEND_DIST, "index.html")
+    if os.path.exists(index_file):
+        return FileResponse(index_file)
     return {
         "status": "online",
-        "service": "Tono Audio Core API",
-        "version": "1.0.0",
+        "service": "Tono Audio Core Pro API",
+        "version": "2.0.0",
         "endpoints": {
             "health": "/api/health",
-            "search": "/api/search?q=...",
-            "trending": "/api/trending",
+            "library_tracks": "/api/library/tracks",
+            "library_stats": "/api/library/stats",
+            "system_network": "/api/system/network",
             "docs": "/docs"
         }
     }
@@ -703,9 +707,13 @@ def storage_stats():
     }
 
 # Mount Frontend SPA if available locally
+# Mount Frontend Assets & SPA if available locally
 if os.path.exists(FRONTEND_DIST):
+    assets_dir = os.path.join(FRONTEND_DIST, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend_assets")
     app.mount("/app", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend_app")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
