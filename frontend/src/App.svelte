@@ -60,8 +60,13 @@
   let trackToAddToPlaylist = null;
   let newPlaylistInput = '';
   let showAudioSettingsModal = false;
-  let isBassBoost = false;
   let crossfadeSeconds = 3;
+  let playbackSpeed = 1.0;
+  let sleepTimerMinutes = 0;
+  let sleepTimerRemaining = 0;
+  let sleepTimerInterval = null;
+  const searchCache = new Map();
+  const artistCache = new Map();
   let toastMessage = '';
   let toastTimeout;
   const prefetchedSet = new Set();
@@ -322,52 +327,92 @@
     }
   }
 
-  let audioCtx = null;
-  let bassNode = null;
-  function toggleBassBoost() {
-    isBassBoost = !isBassBoost;
-    try {
-      if (!audioCtx && audioElement) {
-        const AudioContext = window.AudioContext || window.webkitAudioContext;
-        audioCtx = new AudioContext();
-        const source = audioCtx.createMediaElementSource(audioElement);
-        bassNode = audioCtx.createBiquadFilter();
-        bassNode.type = 'lowshelf';
-        bassNode.frequency.value = 160;
-        source.connect(bassNode);
-        bassNode.connect(audioCtx.destination);
-      }
-      if (bassNode) {
-        bassNode.gain.value = isBassBoost ? 8.5 : 0;
-      }
-      if (audioCtx && audioCtx.state === 'suspended') {
-        audioCtx.resume();
-      }
-      showToast(isBassBoost ? '🔥 Bass Boost Studio Activado (+8.5 dB)' : 'Bass Boost Desactivado (Plano)');
-    } catch (e) {
-      console.warn('Web Audio API note:', e);
-      showToast(isBassBoost ? 'Bass Boost Activado' : 'Bass Boost Desactivado');
+  function setPlaybackSpeed(speed) {
+    playbackSpeed = speed;
+    if (audioElement) {
+      audioElement.playbackRate = speed;
     }
+    showToast(`Velocidad: ${speed}x`);
   }
 
-  // --- Search Handler ---
+  function setSleepTimer(minutes) {
+    if (sleepTimerInterval) clearInterval(sleepTimerInterval);
+    sleepTimerMinutes = minutes;
+    if (minutes === 0) {
+      sleepTimerRemaining = 0;
+      showToast('Temporizador desactivado');
+      return;
+    }
+    if (minutes === 'end') {
+      sleepTimerRemaining = -1;
+      showToast('Se apagará al terminar esta canción');
+      return;
+    }
+    sleepTimerRemaining = minutes * 60;
+    showToast(`Temporizador: apagado en ${minutes} min`);
+    sleepTimerInterval = setInterval(() => {
+      if (sleepTimerRemaining > 0) {
+        sleepTimerRemaining--;
+        if (sleepTimerRemaining <= 0) {
+          clearInterval(sleepTimerInterval);
+          if (audioElement) audioElement.pause();
+          isPlaying = false;
+          sleepTimerMinutes = 0;
+          showToast('🌙 Temporizador: Reproducción detenida');
+        }
+      }
+    }, 1000);
+  }
+
+  function resetAudioOutput() {
+    if (audioElement) {
+      const curSrc = audioElement.src;
+      const curTime = audioElement.currentTime;
+      audioElement.pause();
+      audioElement.load();
+      if (curSrc) {
+        audioElement.src = curSrc;
+        audioElement.currentTime = curTime;
+        audioElement.play().catch(e => console.warn('Play error:', e));
+        isPlaying = true;
+      }
+    }
+    showToast('🔊 Salida de audio restablecida');
+  }
+
+  // --- Search Handler with Instant 0ms Memory Cache ---
   let searchTimeout;
   function handleSearchInput() {
     clearTimeout(searchTimeout);
-    if (!searchQuery.trim()) {
+    const q = searchQuery.trim();
+    if (!q) {
       searchResults = [];
       return;
     }
-    searchTimeout = setTimeout(performSearch, 350);
+    const cacheKey = `${q.toLowerCase()}::${searchSource}`;
+    if (searchCache.has(cacheKey)) {
+      searchResults = searchCache.get(cacheKey);
+      isSearching = false;
+      return;
+    }
+    searchTimeout = setTimeout(performSearch, 280);
   }
 
   async function performSearch() {
-    if (!searchQuery.trim()) return;
+    const q = searchQuery.trim();
+    if (!q) return;
+    const cacheKey = `${q.toLowerCase()}::${searchSource}`;
+    if (searchCache.has(cacheKey)) {
+      searchResults = searchCache.get(cacheKey);
+      isSearching = false;
+      return;
+    }
     isSearching = true;
     try {
-      const res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(searchQuery)}&source=${searchSource}`);
+      const res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(q)}&source=${searchSource}`);
       const data = await res.json();
       searchResults = data.results || [];
+      searchCache.set(cacheKey, searchResults);
     } catch (e) {
       console.error('Search error:', e);
     } finally {
@@ -375,15 +420,22 @@
     }
   }
 
-  // --- Artist Profile Fetcher ---
+  // --- Artist Profile Fetcher with Instant 0ms Cache ---
   async function openArtistProfile(artistName, e) {
     if (e) e.stopPropagation();
-    isLoadingArtist = true;
+    const aKey = artistName.trim().toLowerCase();
     activeTab = 'artist';
+    if (artistCache.has(aKey)) {
+      currentArtist = artistCache.get(aKey);
+      isLoadingArtist = false;
+      return;
+    }
+    isLoadingArtist = true;
     try {
       const res = await fetch(`${API_BASE}/artist?name=${encodeURIComponent(artistName)}`);
       const data = await res.json();
       currentArtist = data;
+      artistCache.set(aKey, data);
     } catch (err) {
       console.error('Error fetching artist:', err);
     } finally {
@@ -467,6 +519,7 @@
         } else {
           audioElement.src = `${API_BASE}/audio-proxy/${track.video_id}?${queryParams}`;
         }
+        audioElement.playbackRate = playbackSpeed;
         await audioElement.play();
         isPlaying = true;
       } catch (err) {
@@ -497,6 +550,14 @@
 
   function playNext() {
     if (queue.length === 0) return;
+    if (sleepTimerMinutes === 'end') {
+      sleepTimerMinutes = 0;
+      sleepTimerRemaining = 0;
+      if (audioElement) audioElement.pause();
+      isPlaying = false;
+      showToast('🌙 Temporizador: Reproducción detenida al finalizar canción');
+      return;
+    }
     if (repeatMode === 2 && audioElement) {
       audioElement.currentTime = 0;
       audioElement.play();
@@ -1057,24 +1118,85 @@
         </button>
       </div>
 
-      <!-- BASS BOOST TOGGLE -->
-      <div style="padding: 16px; background: #0c0e15; border-radius: 12px; border: 1px solid #1f2538; display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
-        <div>
-          <div style="font-weight: 800; font-size: 0.95rem; color: #fff; display: flex; align-items: center; gap: 8px;">
-            Studio Bass Boost (+8.5 dB)
-            {#if isBassBoost}
-              <span style="font-size: 0.65rem; background: #3b82f6; color: #fff; padding: 2px 6px; border-radius: 4px;">ACTIVO</span>
-            {/if}
-          </div>
-          <div style="font-size: 0.76rem; color: #94a3b8; margin-top: 4px;">Realce analógico para graves profundos y contundentes.</div>
+      <!-- VELOCIDAD DE REPRODUCCIÓN -->
+      <div style="padding: 16px; background: #0c0e15; border-radius: 12px; border: 1px solid #1f2538; margin-bottom: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span style="font-weight: 800; font-size: 0.92rem; color: #fff;">Velocidad de reproducción</span>
+          <span style="font-size: 0.8rem; color: #60a5fa; font-weight: 700;">{playbackSpeed}x</span>
         </div>
-        <button 
-          type="button"
-          on:click={toggleBassBoost}
-          style="width: 52px; height: 28px; border-radius: 14px; background: {isBassBoost ? '#3b82f6' : '#22283a'}; border: none; cursor: pointer; position: relative; transition: background 0.2s;"
-        >
-          <div style="width: 22px; height: 22px; border-radius: 50%; background: #fff; position: absolute; top: 3px; left: {isBassBoost ? '27px' : '3px'}; transition: left 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>
-        </button>
+        <p style="font-size: 0.74rem; color: #94a3b8; margin-bottom: 12px;">Ajusta la velocidad de reproducción sin alterar el tono.</p>
+        <div style="display: flex; gap: 8px;">
+          {#each [0.75, 1.0, 1.25, 1.5, 2.0] as spd}
+            <button 
+              type="button"
+              on:click={() => setPlaybackSpeed(spd)}
+              style="flex: 1; padding: 7px 0; border-radius: 8px; font-size: 0.8rem; font-weight: 800; border: none; cursor: pointer; background: {playbackSpeed === spd ? '#3b82f6' : '#1c2130'}; color: {playbackSpeed === spd ? '#fff' : '#94a3b8'}; transition: all 0.15s;"
+            >
+              {spd === 1.0 ? '1x' : `${spd}x`}
+            </button>
+          {/each}
+        </div>
+      </div>
+
+      <!-- TEMPORIZADOR DE APAGADO (SLEEP TIMER) -->
+      <div style="padding: 16px; background: #0c0e15; border-radius: 12px; border: 1px solid #1f2538; margin-bottom: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span style="font-weight: 800; font-size: 0.92rem; color: #fff;">Temporizador de apagado</span>
+          {#if sleepTimerRemaining > 0}
+            <span style="font-size: 0.8rem; color: #3b82f6; font-weight: 800;">
+              {Math.floor(sleepTimerRemaining / 60)}:{sleepTimerRemaining % 60 < 10 ? '0' : ''}{sleepTimerRemaining % 60}
+            </span>
+          {:else if sleepTimerMinutes === 'end'}
+            <span style="font-size: 0.8rem; color: #3b82f6; font-weight: 800;">Fin de canción</span>
+          {:else}
+            <span style="font-size: 0.8rem; color: #64748b; font-weight: 700;">Desactivado</span>
+          {/if}
+        </div>
+        <p style="font-size: 0.74rem; color: #94a3b8; margin-bottom: 12px;">Detiene automáticamente la reproducción al terminar.</p>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+          <button 
+            type="button"
+            on:click={() => setSleepTimer(0)}
+            style="padding: 7px 0; border-radius: 8px; font-size: 0.78rem; font-weight: 700; border: none; cursor: pointer; background: {sleepTimerMinutes === 0 ? '#3b82f6' : '#1c2130'}; color: {sleepTimerMinutes === 0 ? '#fff' : '#94a3b8'};"
+          >
+            Off
+          </button>
+          <button 
+            type="button"
+            on:click={() => setSleepTimer(15)}
+            style="padding: 7px 0; border-radius: 8px; font-size: 0.78rem; font-weight: 700; border: none; cursor: pointer; background: {sleepTimerMinutes === 15 ? '#3b82f6' : '#1c2130'}; color: {sleepTimerMinutes === 15 ? '#fff' : '#94a3b8'};"
+          >
+            15m
+          </button>
+          <button 
+            type="button"
+            on:click={() => setSleepTimer(30)}
+            style="padding: 7px 0; border-radius: 8px; font-size: 0.78rem; font-weight: 700; border: none; cursor: pointer; background: {sleepTimerMinutes === 30 ? '#3b82f6' : '#1c2130'}; color: {sleepTimerMinutes === 30 ? '#fff' : '#94a3b8'};"
+          >
+            30m
+          </button>
+          <button 
+            type="button"
+            on:click={() => setSleepTimer(45)}
+            style="padding: 7px 0; border-radius: 8px; font-size: 0.78rem; font-weight: 700; border: none; cursor: pointer; background: {sleepTimerMinutes === 45 ? '#3b82f6' : '#1c2130'}; color: {sleepTimerMinutes === 45 ? '#fff' : '#94a3b8'};"
+          >
+            45m
+          </button>
+          <button 
+            type="button"
+            on:click={() => setSleepTimer(60)}
+            style="padding: 7px 0; border-radius: 8px; font-size: 0.78rem; font-weight: 700; border: none; cursor: pointer; background: {sleepTimerMinutes === 60 ? '#3b82f6' : '#1c2130'}; color: {sleepTimerMinutes === 60 ? '#fff' : '#94a3b8'};"
+          >
+            1h
+          </button>
+          <button 
+            type="button"
+            on:click={() => setSleepTimer('end')}
+            style="padding: 7px 0; border-radius: 8px; font-size: 0.78rem; font-weight: 700; border: none; cursor: pointer; background: {sleepTimerMinutes === 'end' ? '#3b82f6' : '#1c2130'}; color: {sleepTimerMinutes === 'end' ? '#fff' : '#94a3b8'};"
+          >
+            Fin pista
+          </button>
+        </div>
       </div>
 
       <!-- CROSSFADE SETTING -->
@@ -1083,7 +1205,7 @@
           <span style="font-weight: 800; font-size: 0.92rem; color: #fff;">Crossfade entre canciones</span>
           <span style="font-size: 0.8rem; color: #60a5fa; font-weight: 700;">{crossfadeSeconds} segundos</span>
         </div>
-        <p style="font-size: 0.74rem; color: #94a3b8; margin-bottom: 12px;">Transición fluida sin silencios entre el final de una pista y el inicio de la siguiente.</p>
+        <p style="font-size: 0.74rem; color: #94a3b8; margin-bottom: 12px;">Transición fluida sin silencios entre canciones.</p>
         <input 
           type="range" 
           min="0" 
@@ -1093,11 +1215,27 @@
         />
       </div>
 
+      <!-- RESET AUDIO BUTTON -->
+      <div style="padding: 14px 16px; background: #0c0e15; border-radius: 12px; border: 1px solid #1f2538; display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
+        <div>
+          <div style="font-weight: 700; font-size: 0.88rem; color: #fff;">Restablecer Salida de Audio</div>
+          <div style="font-size: 0.73rem; color: #94a3b8; margin-top: 2px;">Recarga el hardware de sonido nativo si se corta.</div>
+        </div>
+        <button 
+          type="button"
+          on:click={resetAudioOutput}
+          style="padding: 8px 14px; border-radius: 8px; background: #1c2130; border: 1px solid #2f3952; color: #fff; font-size: 0.78rem; font-weight: 700; cursor: pointer;"
+          class="hover:bg-[#283045]"
+        >
+          Restablecer
+        </button>
+      </div>
+
       <!-- AUDIO QUALITY BADGE -->
       <div style="padding: 12px 16px; background: rgba(59, 130, 246, 0.08); border-radius: 10px; border: 1px solid rgba(59, 130, 246, 0.25); display: flex; align-items: center; justify-content: space-between;">
-        <div style="font-size: 0.8rem; color: #94a3b8;">Calidad de Flujo:</div>
+        <div style="font-size: 0.8rem; color: #94a3b8;">Salida de Audio:</div>
         <div style="font-size: 0.85rem; font-weight: 800; color: #60a5fa; display: flex; align-items: center; gap: 6px;">
-          <Sparkles size={16} color="#3b82f6" /> Master Hi-Fi (Opus 192kbps / MP3 320kbps)
+          <Sparkles size={16} color="#3b82f6" /> Master Hi-Fi Directo (Opus / MP3)
         </div>
       </div>
 
@@ -1253,10 +1391,11 @@
       <div style="display: flex; align-items: center; gap: 16px;">
         <button 
           type="button"
-          on:click={toggleBassBoost}
-          style="padding: 8px 16px; border-radius: 500px; background: {isBassBoost ? '#3b82f6' : 'rgba(255,255,255,0.1)'}; border: none; color: #fff; font-size: 0.8rem; font-weight: 800; cursor: pointer; display: flex; align-items: center; gap: 6px;"
+          on:click={() => showAudioSettingsModal = true}
+          style="padding: 8px 16px; border-radius: 500px; background: rgba(255,255,255,0.1); border: none; color: #fff; font-size: 0.8rem; font-weight: 800; cursor: pointer; display: flex; align-items: center; gap: 6px;"
+          class="hover:bg-white hover:text-black"
         >
-          <Sparkles size={16} /> Bass Boost
+          <SlidersHorizontal size={16} /> {playbackSpeed !== 1.0 ? `${playbackSpeed}x` : 'Ajustes'}
         </button>
         <button 
           type="button"
@@ -2103,15 +2242,18 @@
       <Mic2 size={18} />
     </button>
 
-    <!-- AUDIO ENHANCER BUTTON -->
+    <!-- AUDIO SETTINGS BUTTON -->
     <button 
       type="button"
       on:click={() => showAudioSettingsModal = true}
-      style="background: transparent; border: none; cursor: pointer; color: {isBassBoost ? '#3b82f6' : '#94a3b8'};"
-      title="Ajustes de Sonido & Bass Boost"
+      style="background: transparent; border: none; cursor: pointer; color: {sleepTimerRemaining > 0 || playbackSpeed !== 1.0 ? '#3b82f6' : '#94a3b8'}; position: relative;"
+      title="Ajustes de Sonido, Velocidad y Temporizador"
       class="hover:text-white"
     >
       <SlidersHorizontal size={18} />
+      {#if sleepTimerRemaining > 0 || playbackSpeed !== 1.0}
+        <span style="position: absolute; top: -2px; right: -2px; width: 6px; height: 6px; border-radius: 50%; background: #3b82f6;"></span>
+      {/if}
     </button>
 
     <!-- QUEUE DRAWER BUTTON -->

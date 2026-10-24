@@ -19,6 +19,14 @@ os.makedirs(COVERS_DIR, exist_ok=True)
 STREAM_CACHE: Dict[str, Any] = {}
 CACHE_TTL = 3600 * 4  # 4 hours
 
+# Search cache: { "query::source": (results, expiry_timestamp) }
+SEARCH_CACHE: Dict[str, Any] = {}
+SEARCH_CACHE_TTL = 1800  # 30 minutes
+
+# Artist cache: { "artist_name": (profile_dict, expiry_timestamp) }
+ARTIST_CACHE: Dict[str, Any] = {}
+ARTIST_CACHE_TTL = 3600 * 2  # 2 hours
+
 def get_storage_dir() -> str:
     """Retrieve user configured storage directory or default CACHE_DIR."""
     try:
@@ -58,12 +66,23 @@ def clean_thumbnail(thumbnails: List[Dict[str, Any]]) -> str:
     return url
 
 def search_music(query: str, source: str = "all") -> List[Dict[str, Any]]:
-    """Search for music across YouTube Music and SoundCloud."""
+    """Search for music across YouTube Music and SoundCloud with high-speed memory caching."""
+    clean_q = query.strip()
+    if not clean_q:
+        return []
+        
+    cache_key = f"{clean_q.lower()}::{source}"
+    now = time.time()
+    if cache_key in SEARCH_CACHE:
+        cached_results, exp = SEARCH_CACHE[cache_key]
+        if now < exp:
+            return cached_results
+
     results = []
     
     if source in ("all", "youtube", "ytmusic") and ytm:
         try:
-            yt_results = ytm.search(query, filter="songs")
+            yt_results = ytm.search(clean_q, filter="songs")
             for item in yt_results:
                 vid = item.get("videoId")
                 if not vid:
@@ -90,11 +109,11 @@ def search_music(query: str, source: str = "all") -> List[Dict[str, Any]]:
             print("Error in ytm search:", e)
             
     # If query mentions remix/dj/sc or user asked for soundcloud
-    if source in ("all", "soundcloud") and (source == "soundcloud" or len(results) < 5 or "remix" in query.lower()):
+    if source in ("all", "soundcloud") and (source == "soundcloud" or len(results) < 5 or "remix" in clean_q.lower()):
         try:
             ydl_opts = {"quiet": True, "extract_flat": True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                sc_info = ydl.extract_info(f"scsearch8:{query}", download=False)
+                sc_info = ydl.extract_info(f"scsearch8:{clean_q}", download=False)
                 for entry in sc_info.get("entries", []):
                     sc_id = entry.get("id")
                     if not sc_id:
@@ -117,6 +136,9 @@ def search_music(query: str, source: str = "all") -> List[Dict[str, Any]]:
                     })
         except Exception as e:
             print("SoundCloud search note:", e)
+
+    if results:
+        SEARCH_CACHE[cache_key] = (results, now + SEARCH_CACHE_TTL)
 
     return results
 
@@ -283,11 +305,20 @@ def download_audio_track(video_id: str, title: str = "", artist: str = "") -> st
     return final_file
 
 def get_artist_profile(artist_name: str) -> Dict[str, Any]:
-    """Retrieve full artist profile including bio, top songs, albums and stats."""
-    if not ytm:
+    """Retrieve full artist profile including bio, top songs, albums and stats with RAM caching."""
+    clean_name = artist_name.strip()
+    if not clean_name or not ytm:
         return {}
+    
+    a_key = clean_name.lower()
+    now = time.time()
+    if a_key in ARTIST_CACHE:
+        cached_prof, exp = ARTIST_CACHE[a_key]
+        if now < exp:
+            return cached_prof
+
     try:
-        search_res = ytm.search(artist_name, filter="artists")
+        search_res = ytm.search(clean_name, filter="artists")
         if not search_res:
             return {}
         
@@ -325,14 +356,16 @@ def get_artist_profile(artist_name: str) -> Dict[str, Any]:
                 "thumbnail": clean_thumbnail(alb.get("thumbnails", []))
             })
 
-        return {
-            "name": data.get("name", artist_name),
+        profile = {
+            "name": data.get("name", clean_name),
             "description": data.get("description", ""),
             "subscribers": data.get("subscribers", ""),
             "banner": clean_thumbnail(data.get("thumbnails", [])),
             "top_songs": top_songs,
             "albums": albums
         }
+        ARTIST_CACHE[a_key] = (profile, now + ARTIST_CACHE_TTL)
+        return profile
     except Exception as e:
         print("Error fetching artist profile:", e)
         return {}

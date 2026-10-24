@@ -89,7 +89,7 @@ def prefetch_feed_streams(tracks: List[Dict[str, Any]], limit: int = 8):
 
 @app.get("/api/health")
 def health():
-    return {"status": "online", "service": "Tono Audio Core", "version": "1.0.4"}
+    return {"status": "online", "service": "Tono Audio Core", "version": "1.0.5"}
 
 @app.get("/api/search")
 def search(q: str = Query(..., min_length=1), source: str = "all", background_tasks: BackgroundTasks = BackgroundTasks()):
