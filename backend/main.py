@@ -73,7 +73,7 @@ class StorageConfig(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"status": "online", "service": "Tono Audio Core", "version": "1.0.2"}
+    return {"status": "online", "service": "Tono Audio Core", "version": "1.0.3"}
 
 @app.get("/api/search")
 def search(q: str = Query(..., min_length=1), source: str = "all"):

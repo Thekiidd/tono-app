@@ -171,7 +171,7 @@ def resolve_stream(video_id: str, source: str = "youtube", title: str = "", arti
             return {"url": cached_url, "is_local": False, "codec": codec}
 
     # 3. Extract via yt-dlp with mobile android client to avoid datacenter bot blocks
-    target_url = f"https://music.youtube.com/watch?v={video_id}"
+    target_url = f"https://www.youtube.com/watch?v={video_id}"
     if source == "soundcloud" or video_id.startswith("sc_"):
         target_url = f"https://api.soundcloud.com/tracks/{video_id.replace('sc_', '')}"
 
@@ -194,7 +194,7 @@ def resolve_stream(video_id: str, source: str = "youtube", title: str = "", arti
                 return {"url": stream_url, "is_local": False, "codec": codec}
     except Exception as yt_err:
         print(f"Primary YouTube stream extraction note for {video_id}: {yt_err}")
-        # Multi-CDN Resilient Fallback: Search SoundCloud by Track & Artist
+        # Multi-CDN Resilient Fallback: Search SoundCloud by Track & Artist (skipping DRM tracks)
         query = f"{artist} {title}".strip()
         if not query and ytm:
             try:
@@ -206,15 +206,20 @@ def resolve_stream(video_id: str, source: str = "youtube", title: str = "", arti
 
         if query:
             try:
-                sc_opts = {"format": "bestaudio/best", "quiet": True, "noplaylist": True}
+                sc_opts = {
+                    "format": "bestaudio/best",
+                    "quiet": True,
+                    "noplaylist": True,
+                    "ignoreerrors": True,
+                }
                 with yt_dlp.YoutubeDL(sc_opts) as sc_ydl:
-                    sc_res = sc_ydl.extract_info(f"scsearch1:{query}", download=False)
-                    entries = sc_res.get("entries", [])
-                    if entries and entries[0].get("url"):
-                        sc_url = entries[0]["url"]
-                        codec = entries[0].get("acodec", "mp3")
-                        STREAM_CACHE[video_id] = (sc_url, now + CACHE_TTL, codec)
-                        return {"url": sc_url, "is_local": False, "codec": codec}
+                    sc_res = sc_ydl.extract_info(f"scsearch5:{query}", download=False)
+                    for entry in sc_res.get("entries", []) or []:
+                        if entry and entry.get("url"):
+                            sc_url = entry["url"]
+                            codec = entry.get("acodec", "mp3")
+                            STREAM_CACHE[video_id] = (sc_url, now + CACHE_TTL, codec)
+                            return {"url": sc_url, "is_local": False, "codec": codec}
             except Exception as sc_err:
                 print(f"SoundCloud fallback stream note: {sc_err}")
 
@@ -240,7 +245,7 @@ def download_audio_track(video_id: str, title: str = "", artist: str = "") -> st
         }],
     }
     
-    target_url = f"https://music.youtube.com/watch?v={video_id}"
+    target_url = f"https://www.youtube.com/watch?v={video_id}"
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([target_url])
         
@@ -304,7 +309,7 @@ def get_artist_profile(artist_name: str) -> Dict[str, Any]:
 
 def get_track_credits(video_id: str) -> Dict[str, Any]:
     """Extract official credits: composers, writers, producers, engineers, and record label."""
-    target_url = f"https://music.youtube.com/watch?v={video_id}"
+    target_url = f"https://www.youtube.com/watch?v={video_id}"
     ydl_opts = {
         "quiet": True,
         "noplaylist": True,
